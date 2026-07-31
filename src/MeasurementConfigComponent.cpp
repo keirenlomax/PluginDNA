@@ -4,9 +4,11 @@ MeasurementConfigComponent::MeasurementConfigComponent() {
     signalTypeLabel.setText("Signal Type:", juce::dontSendNotification);
     addAndMakeVisible(signalTypeLabel);
 
-    signalTypeCombo.addItem("Sine", 1);
-    signalTypeCombo.addItem("Noise", 2);
-    signalTypeCombo.addItem("Sweep", 3);
+    signalTypeCombo.addItem("All (Recommended)", 1);
+    signalTypeCombo.addSeparator();
+    signalTypeCombo.addItem("Sine", 2);
+    signalTypeCombo.addItem("Noise", 3);
+    signalTypeCombo.addItem("Sweep", 4);
     signalTypeCombo.setSelectedId(1);
     signalTypeCombo.addListener(this);
     addAndMakeVisible(signalTypeCombo);
@@ -153,8 +155,8 @@ void MeasurementConfigComponent::buttonClicked(juce::Button* button) {
 
 void MeasurementConfigComponent::updateUI() {
     int signalType = signalTypeCombo.getSelectedId();
-    bool showSine = (signalType == 1);
-    bool showSweep = (signalType == 3);
+    bool showSine = (signalType == 1 || signalType == 2);
+    bool showSweep = (signalType == 1 || signalType == 4);
 
     sineFreqLabel.setVisible(showSine);
     sineFreqEditor.setVisible(showSine);
@@ -169,10 +171,12 @@ void MeasurementConfigComponent::updateUI() {
 void MeasurementConfigComponent::fillConfig(Config& config) {
     int signalType = signalTypeCombo.getSelectedId();
     if (signalType == 1)
-        config.signalType = "sine";
+        config.signalType = "all";
     else if (signalType == 2)
-        config.signalType = "noise";
+        config.signalType = "sine";
     else if (signalType == 3)
+        config.signalType = "noise";
+    else if (signalType == 4)
         config.signalType = "sweep";
 
     config.sineFrequency = sineFreqEditor.getText().getDoubleValue();
@@ -207,12 +211,14 @@ void MeasurementConfigComponent::fillConfig(Config& config) {
 }
 
 void MeasurementConfigComponent::loadFromConfig(const Config& config) {
-    if (config.signalType == "sine")
+    if (config.signalType == "all")
         signalTypeCombo.setSelectedId(1);
-    else if (config.signalType == "noise")
+    else if (config.signalType == "sine")
         signalTypeCombo.setSelectedId(2);
-    else if (config.signalType == "sweep")
+    else if (config.signalType == "noise")
         signalTypeCombo.setSelectedId(3);
+    else if (config.signalType == "sweep")
+        signalTypeCombo.setSelectedId(4);
 
     sineFreqEditor.setText(juce::String(config.sineFrequency), juce::dontSendNotification);
     sweepStartEditor.setText(juce::String(config.sweepStartHz), juce::dontSendNotification);

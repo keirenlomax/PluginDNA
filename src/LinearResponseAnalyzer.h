@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <vector>
+#include <utility>
 
 struct LinearResponseAnalyzer : public Analyzer
 {
@@ -25,11 +26,16 @@ struct LinearResponseAnalyzer : public Analyzer
     /**
         Returns the most recently completed in-memory linear-response dataset.
 
-        This is populated during finish(), alongside the existing CSV export.
+        This is populated during finish() and retained in memory for optional export.
     */
     const MeasurementDataset& getResult() const noexcept
     {
         return result;
+    }
+
+    MeasurementDataset takeResult() noexcept
+    {
+        return std::move(result);
     }
 
 private:

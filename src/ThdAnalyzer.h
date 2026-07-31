@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <vector>
+#include <utility>
 
 struct ThdAnalyzer : public Analyzer
 {
@@ -27,11 +28,16 @@ struct ThdAnalyzer : public Analyzer
     /**
         Returns the most recently completed in-memory THD dataset.
 
-        This is populated during finish(), alongside the existing CSV export.
+        This is populated during finish() and retained in memory for optional export.
     */
     const MeasurementDataset& getResult() const noexcept
     {
         return result;
+    }
+
+    MeasurementDataset takeResult() noexcept
+    {
+        return std::move(result);
     }
 
 private:

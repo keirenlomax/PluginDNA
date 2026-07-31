@@ -4,9 +4,9 @@
 #include "JuceHeader.h"
 #include "MeasurementResult.h"
 
-#include <fstream>
 #include <memory>
 #include <vector>
+#include <utility>
 
 struct RawCsvAnalyzer : public Analyzer
 {
@@ -19,18 +19,21 @@ struct RawCsvAnalyzer : public Analyzer
     /**
         Returns the most recently completed in-memory raw-sample dataset.
 
-        This is populated during finish(), alongside the existing CSV export.
+        This is populated during finish() and retained in memory for optional export.
     */
     const MeasurementDataset& getResult() const noexcept
     {
         return result;
     }
 
+    MeasurementDataset takeResult() noexcept
+    {
+        return std::move(result);
+    }
+
 private:
     void buildResult();
 
-    std::unique_ptr<std::ofstream> csvFile;
-    bool headerWritten = false;
     juce::String signalType;
 
     std::vector<std::vector<double>> capturedRows;

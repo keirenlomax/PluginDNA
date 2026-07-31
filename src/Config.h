@@ -18,7 +18,7 @@ struct Config {
     double sampleRate = 96000.0;
     double seconds = 5.0;
     int blockSize = 256;
-    juce::String signalType; // "sine", "noise", "sweep"
+    juce::String signalType = "all"; // "all", "sine", "noise", "sweep"
     double sineFrequency = 1000.0;
     double sweepStartHz = 20.0;
     double sweepEndHz = 20000.0;

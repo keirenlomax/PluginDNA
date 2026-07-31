@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <vector>
+#include <utility>
 
 struct TransferCurveAnalyzer : public Analyzer
 {
@@ -24,11 +25,16 @@ struct TransferCurveAnalyzer : public Analyzer
     /**
         Returns the most recently completed in-memory transfer-curve dataset.
 
-        This is populated during finish(), alongside the existing CSV export.
+        This is populated during finish() and retained in memory for optional export.
     */
     const MeasurementDataset& getResult() const noexcept
     {
         return result;
+    }
+
+    MeasurementDataset takeResult() noexcept
+    {
+        return std::move(result);
     }
 
 private:

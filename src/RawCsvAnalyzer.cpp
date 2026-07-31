@@ -8,31 +8,10 @@ RawCsvAnalyzer::RawCsvAnalyzer(
     const juce::String& signalType)
     : signalType(signalType)
 {
-    const juce::String filename =
-        "raw_" + signalType.toLowerCase() + ".csv";
-
-    const juce::File outputFile = outDir.getChildFile(filename);
-
-    csvFile = std::make_unique<std::ofstream>(
-        outputFile.getFullPathName().toStdString());
-
-    if (!csvFile->is_open())
-    {
-        std::cerr
-            << "Failed to open "
-            << filename.toStdString()
-            << " for writing"
-            << std::endl;
-
-        csvFile.reset();
-    }
+    juce::ignoreUnused(outDir);
 }
 
-RawCsvAnalyzer::~RawCsvAnalyzer()
-{
-    if (csvFile && csvFile->is_open())
-        csvFile->close();
-}
+RawCsvAnalyzer::~RawCsvAnalyzer() = default;
 
 void RawCsvAnalyzer::processBlock(const BlockContext& ctx)
 {
@@ -41,22 +20,6 @@ void RawCsvAnalyzer::processBlock(const BlockContext& ctx)
 
     capturedInputRight = capturedInputRight || hasInputRight;
     capturedOutputRight = capturedOutputRight || hasOutputRight;
-
-    if (csvFile && !headerWritten)
-    {
-        *csvFile << "runId,sample,time_sec,inL";
-
-        if (hasInputRight)
-            *csvFile << ",inR";
-
-        *csvFile << ",outL";
-
-        if (hasOutputRight)
-            *csvFile << ",outR";
-
-        *csvFile << "\n";
-        headerWritten = true;
-    }
 
     for (int i = 0; i < ctx.numSamples; ++i)
     {
@@ -81,25 +44,6 @@ void RawCsvAnalyzer::processBlock(const BlockContext& ctx)
             row.push_back(static_cast<double>(ctx.outR[i]));
 
         capturedRows.push_back(std::move(row));
-
-        if (csvFile)
-        {
-            *csvFile
-                << ctx.runId << ","
-                << sampleIndex << ","
-                << timeSec << ","
-                << ctx.inL[i];
-
-            if (hasInputRight)
-                *csvFile << "," << ctx.inR[i];
-
-            *csvFile << "," << ctx.outL[i];
-
-            if (hasOutputRight)
-                *csvFile << "," << ctx.outR[i];
-
-            *csvFile << "\n";
-        }
     }
 }
 
@@ -127,14 +71,7 @@ void RawCsvAnalyzer::buildResult()
 void RawCsvAnalyzer::finish(const juce::File& outDir)
 {
     juce::ignoreUnused(outDir);
-
     buildResult();
-
-    if (csvFile && csvFile->is_open())
-    {
-        csvFile->close();
-        csvFile.reset();
-    }
 }
 
 std::unique_ptr<Analyzer> createRawCsvAnalyzer(

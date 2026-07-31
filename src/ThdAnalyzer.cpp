@@ -194,50 +194,8 @@ void ThdAnalyzer::buildResult()
 
 void ThdAnalyzer::finish(const juce::File& outDir)
 {
+    juce::ignoreUnused(outDir);
     buildResult();
-
-    // Keep the existing CSV export, now written from the in-memory dataset.
-    const juce::String filename =
-        "grid_thd_" + signalType.toLowerCase() + ".csv";
-
-    const juce::File csvFile = outDir.getChildFile(filename);
-    std::ofstream out(csvFile.getFullPathName().toStdString());
-
-    if (!out.is_open())
-    {
-        std::cerr
-            << "Failed to open "
-            << filename.toStdString()
-            << " for writing"
-            << std::endl;
-
-        return;
-    }
-
-    for (std::size_t column = 0;
-         column < result.columns.size();
-         ++column)
-    {
-        if (column > 0)
-            out << ',';
-
-        out << result.columns[column];
-    }
-
-    out << '\n';
-
-    for (const auto& row : result.rows)
-    {
-        for (std::size_t column = 0; column < row.size(); ++column)
-        {
-            if (column > 0)
-                out << ',';
-
-            out << row[column];
-        }
-
-        out << '\n';
-    }
 }
 
 std::unique_ptr<Analyzer> createThdAnalyzer(

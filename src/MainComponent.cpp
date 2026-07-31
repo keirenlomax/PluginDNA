@@ -12,6 +12,10 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <stdexcept>
+
+#include <fstream>
+#include <iomanip>
 
 namespace
 {
@@ -2214,6 +2218,11 @@ MainComponent::MainComponent()
     browseOutputButton.addListener(this);
     addAndMakeVisible(browseOutputButton);
 
+    exportDataButton.setButtonText("Export Data");
+    exportDataButton.addListener(this);
+    exportDataButton.setEnabled(false);
+    addAndMakeVisible(exportDataButton);
+
     // Human-readable result summary
     resultsSummaryGroup.setText("Signal Summary");
     addAndMakeVisible(resultsSummaryGroup);
@@ -2301,6 +2310,8 @@ void MainComponent::resized() {
     browseOutputButton.setBounds(outputRow.removeFromLeft(100));
     outputRow.removeFromLeft(10);
     runMeasurementButton.setBounds(outputRow.removeFromLeft(150));
+    outputRow.removeFromLeft(10);
+    exportDataButton.setBounds(outputRow.removeFromLeft(120));
 
     bounds.removeFromTop(10);
 
@@ -2407,6 +2418,8 @@ void MainComponent::buttonClicked(juce::Button* button) {
     } else if (button == &copySummaryButton) {
         juce::SystemClipboard::copyTextToClipboard(buildSummaryText());
         progressLabel.setText("Summary copied to clipboard", juce::dontSendNotification);
+    } else if (button == &exportDataButton) {
+        exportMeasurementData();
     }
 }
 
@@ -2577,21 +2590,9 @@ void MainComponent::runMeasurement() {
         return;
     }
 
-    juce::String outputPath = outputPathEditor.getText();
-    if (outputPath.isEmpty()) {
-        showError("Please specify an output path");
-        return;
-    }
-
-    juce::File outDir(outputPath);
-    if (!outDir.exists()) {
-        outDir.createDirectory();
-    }
-
-    if (!outDir.isDirectory()) {
-        showError("Output path is not a directory");
-        return;
-    }
+    // The output path is only used when Export Data is pressed. Measurement
+    // itself stays entirely in memory and does not create files or folders.
+    juce::File outDir(outputPathEditor.getText());
 
     // Build config from UI
     Config config = buildConfigFromUI();
@@ -2599,26 +2600,16 @@ void MainComponent::runMeasurement() {
 
     // Run measurement in background thread
     runMeasurementButton.setEnabled(false);
+    exportDataButton.setEnabled(false);
     progressLabel.setText("Running measurement...", juce::dontSendNotification);
     clearResultsSummary();
+    {
+        std::lock_guard<std::mutex> lock(pendingExportMutex);
+        pendingExportDatasets.clear();
+    }
 
     std::thread([this, config, outDir]() {
         try {
-
-            // Create a separate plugin instance for the measurement thread
-            // This is necessary because JUCE plugins should not be accessed from multiple threads
-            juce::File pluginFile(config.pluginPath);
-            juce::String errorMessage;
-            auto measurementPlugin = loadPluginInstance(pluginFile, config.sampleRate, config.blockSize, errorMessage);
-
-            if (measurementPlugin == nullptr) {
-                std::cerr << "[Measurement] Failed to create plugin instance: " << errorMessage << std::endl;
-                juce::MessageManager::callAsync([this, errorMessage]() {
-                    showError("Failed to create plugin instance for measurement: " + errorMessage);
-                    runMeasurementButton.setEnabled(true);
-                });
-                return;
-            }
 
             // Build parameter name list
             std::vector<juce::String> paramNames;
@@ -2660,59 +2651,190 @@ void MainComponent::runMeasurement() {
                 std::this_thread::sleep_for(std::chrono::seconds(3)); // Give user time to see warning
             }
 
-            // Create analyzers
-            auto analyzers = createAnalyzers(config, outDir, paramNames);
+            WaveformSummary waveformSummary {
+                "WAVE SHAPE  Run Raw with a sine signal",
+                "WHAT IT DOES  unavailable",
+                "SIMILAR TO  unavailable"
+            };
+            TemporalSummary temporalSummary {
+                "TEMPORAL RESPONSE  Run Raw with a sine signal",
+                "ATTACK HANDLING  unavailable",
+                "AFTER-EFFECTS  unavailable"
+            };
 
-            // Run measurements
-            int64_t totalSamples = (int64_t)(config.seconds * config.sampleRate);
-            juce::MessageManager::callAsync([this, runs]() {
-                progressLabel.setText("Running " + juce::String(runs.size()) + " measurements...",
-                                      juce::dontSendNotification);
-            });
+            MeasurementDataset sineRmsResult;
+            MeasurementDataset sineThdResult;
+            MeasurementDataset sineTransferResult;
+            MeasurementDataset sweepLinearResult;
+            MeasurementDataset noiseLinearResult;
+            std::vector<PendingExportDataset> completedExports;
 
-            // Pass progress callback to update UI with time estimate
-            auto startTime = std::chrono::steady_clock::now();
-            runMeasurementGrid(
-                *measurementPlugin, config.sampleRate, config.blockSize, totalSamples, runs, analyzers, config, outDir,
-                [this, runs, startTime](int runIndex) {
-                    double progress = (double)(runIndex + 1) / (double)runs.size();
-                    auto currentTime = std::chrono::steady_clock::now();
-                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(currentTime - startTime).count();
+            bool haveSineRaw = false;
+            bool haveSineRms = false;
+            bool haveSineThd = false;
+            bool haveSineTransfer = false;
+            bool haveSweepLinear = false;
+            bool haveNoiseLinear = false;
 
-                    juce::String statusText = "Run " + juce::String(runIndex + 1) + " / " + juce::String(runs.size());
+            std::vector<juce::String> passSignals;
+            if (config.signalType.equalsIgnoreCase("all"))
+                passSignals = { "sine", "sweep", "noise" };
+            else
+                passSignals = { config.signalType };
 
-                    // Estimate remaining time
-                    if (runIndex > 0 && elapsed > 0) {
-                        double runsPerSecond = (double)(runIndex + 1) / (double)elapsed;
-                        int remainingRuns = runs.size() - (runIndex + 1);
-                        int estimatedSecondsRemaining = (int)(remainingRuns / runsPerSecond);
+            const int totalPassRuns = (int)(runs.size() * passSignals.size());
+            int completedPassRuns = 0;
+            auto overallStartTime = std::chrono::steady_clock::now();
 
-                        int hours = estimatedSecondsRemaining / 3600;
-                        int minutes = (estimatedSecondsRemaining % 3600) / 60;
-                        int seconds = estimatedSecondsRemaining % 60;
+            for (const auto& passSignal : passSignals)
+            {
+                Config passConfig = config;
+                passConfig.signalType = passSignal;
 
-                        if (hours > 0) {
-                            statusText += " (~" + juce::String(hours) + "h " + juce::String(minutes) + "m remaining)";
-                        } else if (minutes > 0) {
-                            statusText += " (~" + juce::String(minutes) + "m " + juce::String(seconds) + "s remaining)";
-                        } else {
-                            statusText += " (~" + juce::String(seconds) + "s remaining)";
-                        }
-                    }
+                // Only create analysers that are valid for this signal. The user's
+                // checkbox choices are preserved; this simply avoids meaningless
+                // warnings and empty analysers during All mode.
+                std::vector<juce::String> validAnalyzers;
+                for (const auto& analyzerName : config.analyzers)
+                {
+                    if (analyzerName.equalsIgnoreCase("Thd") && !passSignal.equalsIgnoreCase("sine"))
+                        continue;
+                    if (analyzerName.equalsIgnoreCase("LinearResponse") && passSignal.equalsIgnoreCase("sine"))
+                        continue;
+                    // In All mode, raw sample pairs are only needed for the sine
+                    // behaviour/temporal pass. Keeping raw noise and sweep data in
+                    // memory would multiply RAM use without improving the summary.
+                    // Individual Noise or Sweep mode still permits Raw exports.
+                    if (config.signalType.equalsIgnoreCase("all")
+                        && analyzerName.equalsIgnoreCase("RawCsv")
+                        && !passSignal.equalsIgnoreCase("sine"))
+                        continue;
+                    validAnalyzers.push_back(analyzerName);
+                }
+                passConfig.analyzers = std::move(validAnalyzers);
 
-                    juce::MessageManager::callAsync([this, statusText, progress]() {
-                        progressLabel.setText(statusText, juce::dontSendNotification);
-                        this->progress = progress;
-                        progressBar.repaint();
-                    });
+                juce::MessageManager::callAsync([this, passSignal]() {
+                    progressLabel.setText("Analysing " + passSignal + "...", juce::dontSendNotification);
                 });
 
-            // Finish analyzers
-            // Finish the original analysers exactly as before.
-            for (auto& analyzer : analyzers) {
-                analyzer->finish(outDir);
-            }
+                // Start every signal pass with a fresh plugin instance so state from
+                // the sine pass cannot leak into sweep or noise measurements.
+                juce::File passPluginFile(passConfig.pluginPath);
+                juce::String passError;
+                auto passPlugin = loadPluginInstance(passPluginFile, passConfig.sampleRate,
+                                                     passConfig.blockSize, passError);
+                if (passPlugin == nullptr)
+                    throw std::runtime_error(("Failed to create plugin instance for " + passSignal +
+                                              " pass: " + passError).toStdString());
 
+                auto passAnalyzers = createAnalyzers(passConfig, juce::File{}, paramNames);
+                const int64_t totalSamples = (int64_t)(passConfig.seconds * passConfig.sampleRate);
+
+                runMeasurementGrid(
+                    *passPlugin, passConfig.sampleRate, passConfig.blockSize, totalSamples,
+                    runs, passAnalyzers, passConfig, juce::File{},
+                    [this, &completedPassRuns, totalPassRuns, overallStartTime, passSignal](int runIndex) {
+                        const int absoluteRun = completedPassRuns + runIndex + 1;
+                        const double overallProgress = totalPassRuns > 0
+                            ? (double)absoluteRun / (double)totalPassRuns : 0.0;
+
+                        auto currentTime = std::chrono::steady_clock::now();
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                            currentTime - overallStartTime).count();
+
+                        juce::String statusText = passSignal.toUpperCase() + "  " +
+                            juce::String(absoluteRun) + " / " + juce::String(totalPassRuns);
+
+                        if (absoluteRun > 1 && elapsed > 0)
+                        {
+                            const double runsPerSecond = (double)absoluteRun / (double)elapsed;
+                            const int remainingRuns = totalPassRuns - absoluteRun;
+                            const int secondsRemaining = runsPerSecond > 0.0
+                                ? (int)(remainingRuns / runsPerSecond) : 0;
+                            if (secondsRemaining >= 60)
+                                statusText += " (~" + juce::String(secondsRemaining / 60) + "m remaining)";
+                            else
+                                statusText += " (~" + juce::String(secondsRemaining) + "s remaining)";
+                        }
+
+                        juce::MessageManager::callAsync([this, statusText, overallProgress]() {
+                            progressLabel.setText(statusText, juce::dontSendNotification);
+                            progress = overallProgress;
+                            progressBar.repaint();
+                        });
+                    });
+
+                completedPassRuns += (int)runs.size();
+
+                for (auto& analyzer : passAnalyzers)
+                    analyzer->finish(juce::File{});
+
+                // Retain only the datasets needed by the current summary. All CSV
+                // exports still remain on disk for every pass.
+                for (const auto& analyzer : passAnalyzers)
+                {
+                    if (passSignal.equalsIgnoreCase("sine"))
+                    {
+                        if (const auto* raw = dynamic_cast<const RawCsvAnalyzer*>(analyzer.get()))
+                        {
+                            const auto& rawResult = raw->getResult();
+                            haveSineRaw = !rawResult.isEmpty();
+                            if (haveSineRaw)
+                            {
+                                waveformSummary = makeWaveformSummary(rawResult);
+                                temporalSummary = makeTemporalSummary(rawResult);
+                            }
+                        }
+                        else if (const auto* rms = dynamic_cast<const RmsPeakAnalyzer*>(analyzer.get()))
+                        {
+                            sineRmsResult = rms->getResult();
+                            haveSineRms = !sineRmsResult.isEmpty();
+                        }
+                        else if (const auto* thd = dynamic_cast<const ThdAnalyzer*>(analyzer.get()))
+                        {
+                            sineThdResult = thd->getResult();
+                            haveSineThd = !sineThdResult.isEmpty();
+                        }
+                        else if (const auto* transfer = dynamic_cast<const TransferCurveAnalyzer*>(analyzer.get()))
+                        {
+                            sineTransferResult = transfer->getResult();
+                            haveSineTransfer = !sineTransferResult.isEmpty();
+                        }
+                    }
+                    else if (passSignal.equalsIgnoreCase("sweep"))
+                    {
+                        if (const auto* linear = dynamic_cast<const LinearResponseAnalyzer*>(analyzer.get()))
+                        {
+                            sweepLinearResult = linear->getResult();
+                            haveSweepLinear = !sweepLinearResult.isEmpty();
+                        }
+                    }
+                    else if (passSignal.equalsIgnoreCase("noise"))
+                    {
+                        if (const auto* linear = dynamic_cast<const LinearResponseAnalyzer*>(analyzer.get()))
+                        {
+                            noiseLinearResult = linear->getResult();
+                            haveNoiseLinear = !noiseLinearResult.isEmpty();
+                        }
+                    }
+                }
+
+                // Move every completed in-memory dataset into the pending export
+                // package. No CSV is written until Export Data is pressed.
+                for (auto& analyzer : passAnalyzers)
+                {
+                    if (auto* raw = dynamic_cast<RawCsvAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ juce::String("raw_") + passSignal.toLowerCase() + ".csv", raw->takeResult() });
+                    else if (auto* rms = dynamic_cast<RmsPeakAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ juce::String("grid_rms_peak_") + passSignal.toLowerCase() + ".csv", rms->takeResult() });
+                    else if (auto* transfer = dynamic_cast<TransferCurveAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ juce::String("grid_transfer_curves_") + passSignal.toLowerCase() + ".csv", transfer->takeResult() });
+                    else if (auto* linear = dynamic_cast<LinearResponseAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ juce::String("grid_linear_response_") + passSignal.toLowerCase() + ".csv", linear->takeResult() });
+                    else if (auto* thd = dynamic_cast<ThdAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ juce::String("grid_thd_") + passSignal.toLowerCase() + ".csv", thd->takeResult() });
+                }
+            }
 
             LevelSummary levelSummary {
                 "Run RMS/Peak to see level behaviour",
@@ -2748,18 +2870,6 @@ void MainComponent::runMeasurement() {
             const MeasurementDataset* linearResult = nullptr;
             const MeasurementDataset* transferResult = nullptr;
 
-            WaveformSummary waveformSummary {
-                "WAVE SHAPE  Run Raw with a sine signal",
-                "WHAT IT DOES  unavailable",
-                "SIMILAR TO  unavailable"
-            };
-
-            TemporalSummary temporalSummary {
-                "TEMPORAL RESPONSE  Run Raw with a sine signal",
-                "ATTACK HANDLING  unavailable",
-                "AFTER-EFFECTS  unavailable"
-            };
-
             NonlinearitySummary nonlinearitySummary {
                 "NONLINEARITY  Run Transfer Curve to classify distortion",
                 "CURVE BEHAVIOUR  unavailable"
@@ -2772,37 +2882,35 @@ void MainComponent::runMeasurement() {
                 "Run Linear Response with noise or sweep to find the strongest feature"
             };
 
-            for (const auto& analyzer : analyzers)
+            if (haveSineRms)
             {
-                if (const auto* rawAnalyzer = dynamic_cast<const RawCsvAnalyzer*>(analyzer.get()))
-                {
-                    waveformSummary = makeWaveformSummary(rawAnalyzer->getResult());
-                    temporalSummary = makeTemporalSummary(rawAnalyzer->getResult());
-                }
+                levelSummary = makeLevelSummary(sineRmsResult);
+                rmsResult = &sineRmsResult;
+            }
 
-                if (const auto* rmsAnalyzer = dynamic_cast<const RmsPeakAnalyzer*>(analyzer.get()))
-                {
-                    levelSummary = makeLevelSummary(rmsAnalyzer->getResult());
-                    rmsResult = &rmsAnalyzer->getResult();
-                }
+            if (haveSineThd)
+            {
+                harmonicSummary = makeHarmonicSummary(sineThdResult);
+                thdResult = &sineThdResult;
+            }
 
-                if (const auto* thdAnalyzer = dynamic_cast<const ThdAnalyzer*>(analyzer.get()))
-                {
-                    harmonicSummary = makeHarmonicSummary(thdAnalyzer->getResult());
-                    thdResult = &thdAnalyzer->getResult();
-                }
+            if (haveSineTransfer)
+            {
+                transferResult = &sineTransferResult;
+                nonlinearitySummary = makeNonlinearitySummary(sineTransferResult);
+            }
 
-                if (const auto* linearAnalyzer = dynamic_cast<const LinearResponseAnalyzer*>(analyzer.get()))
-                {
-                    toneSummary = makeToneSummary(linearAnalyzer->getResult());
-                    linearResult = &linearAnalyzer->getResult();
-                }
-
-                if (const auto* transferAnalyzer = dynamic_cast<const TransferCurveAnalyzer*>(analyzer.get()))
-                {
-                    transferResult = &transferAnalyzer->getResult();
-                    nonlinearitySummary = makeNonlinearitySummary(transferAnalyzer->getResult());
-                }
+            // Sweep is the preferred deterministic tone pass. Noise remains a
+            // broadband fallback and is still exported for future texture rules.
+            if (haveSweepLinear)
+            {
+                toneSummary = makeToneSummary(sweepLinearResult);
+                linearResult = &sweepLinearResult;
+            }
+            else if (haveNoiseLinear)
+            {
+                toneSummary = makeToneSummary(noiseLinearResult);
+                linearResult = &noiseLinearResult;
             }
 
             behaviourSummary = makeBehaviourSummary(rmsResult, thdResult, linearResult);
@@ -2810,6 +2918,11 @@ void MainComponent::runMeasurement() {
             identitySummary = makeIdentitySummary(levelSummary, harmonicSummary, toneSummary, behaviourSummary,
                                                   operatingRangeSummary, nonlinearitySummary, waveformSummary,
                                                   temporalSummary);
+
+            {
+                std::lock_guard<std::mutex> lock(pendingExportMutex);
+                pendingExportDatasets = std::move(completedExports);
+            }
 
             juce::MessageManager::callAsync([this, identitySummary, levelSummary, harmonicSummary, toneSummary, behaviourSummary, operatingRangeSummary, nonlinearitySummary, waveformSummary, temporalSummary]() {
                 progressLabel.setText(
@@ -2845,6 +2958,7 @@ void MainComponent::runMeasurement() {
                 progressBar.repaint();
                 runMeasurementButton.setEnabled(true);
                 copySummaryButton.setEnabled(true);
+                exportDataButton.setEnabled(true);
             });
         } catch (const std::exception& e) {
             std::cerr << "[Measurement] Exception: " << e.what() << std::endl;
@@ -2913,9 +3027,104 @@ juce::String MainComponent::buildSummaryText() const
     return lines.joinIntoString("\n");
 }
 
+void MainComponent::exportMeasurementData()
+{
+    std::cerr << "[EXPORT] exportMeasurementData CALLED" << std::endl;
+    const auto outputPath = outputPathEditor.getText().trim();
+    if (outputPath.isEmpty())
+    {
+        showError("Please specify an output path");
+        return;
+    }
+
+    juce::File outDir(outputPath);
+    if (!outDir.exists() && !outDir.createDirectory())
+    {
+        showError("Could not create output directory");
+        return;
+    }
+
+    exportDataButton.setEnabled(false);
+    runMeasurementButton.setEnabled(false);
+    progressLabel.setText("Exporting measurement data...", juce::dontSendNotification);
+
+    std::thread([this, outDir]() {
+        bool success = true;
+        juce::String failedFile;
+        int exportedCount = 0;
+        int totalCount = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(pendingExportMutex);
+            totalCount = static_cast<int>(pendingExportDatasets.size());
+
+            for (const auto& item : pendingExportDatasets)
+            {
+                const auto file = outDir.getChildFile(item.filename);
+                std::ofstream out(file.getFullPathName().toStdString(),
+                                  std::ios::out | std::ios::trunc);
+
+                if (!out.is_open())
+                {
+                    success = false;
+                    failedFile = item.filename;
+                    break;
+                }
+
+                out << std::setprecision(10);
+                for (std::size_t column = 0; column < item.dataset.columns.size(); ++column)
+                {
+                    if (column > 0)
+                        out << ',';
+                    out << item.dataset.columns[column];
+                }
+                out << '\n';
+
+                for (const auto& row : item.dataset.rows)
+                {
+                    for (std::size_t column = 0; column < row.size(); ++column)
+                    {
+                        if (column > 0)
+                            out << ',';
+                        out << row[column];
+                    }
+                    out << '\n';
+                }
+
+                if (!out.good())
+                {
+                    success = false;
+                    failedFile = item.filename;
+                    break;
+                }
+
+                ++exportedCount;
+                juce::MessageManager::callAsync([this, exportedCount, totalCount]() {
+                    progressLabel.setText(
+                        "Exporting data " + juce::String(exportedCount) + " / " + juce::String(totalCount),
+                        juce::dontSendNotification);
+                });
+            }
+        }
+
+        juce::MessageManager::callAsync([this, success, failedFile, exportedCount]() {
+            runMeasurementButton.setEnabled(true);
+            exportDataButton.setEnabled(true);
+
+            if (success)
+                progressLabel.setText(
+                    "Exported " + juce::String(exportedCount) + " data files",
+                    juce::dontSendNotification);
+            else
+                showError("Failed to export " + failedFile);
+        });
+    }).detach();
+}
+
 void MainComponent::clearResultsSummary()
 {
     copySummaryButton.setEnabled(false);
+    exportDataButton.setEnabled(false);
     identityRoleLabel.setText("PRIMARY ROLE  waiting for complete measurement", juce::dontSendNotification);
     identityWhyLabel.setText("WHY  waiting for evidence", juce::dontSendNotification);
     identityWatchLabel.setText("WATCH OUT  waiting for evidence", juce::dontSendNotification);

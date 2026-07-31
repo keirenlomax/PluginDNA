@@ -5,7 +5,9 @@
 #include "MeasurementEngine.h"
 #include "PluginLoader.h"
 #include <memory>
+#include <mutex>
 #include <vector>
+#include "MeasurementResult.h"
 
 class ParameterConfigComponent;
 class MeasurementConfigComponent;
@@ -37,6 +39,13 @@ private:
     void showError(const juce::String& message);
     void clearResultsSummary();
     juce::String buildSummaryText() const;
+    void exportMeasurementData();
+
+    struct PendingExportDataset
+    {
+        juce::String filename;
+        MeasurementDataset dataset;
+    };
 
     // Plugin selection
     juce::Label pluginPathLabel;
@@ -67,6 +76,7 @@ private:
     juce::Label outputPathLabel;
     juce::TextEditor outputPathEditor;
     juce::TextButton browseOutputButton;
+    juce::TextButton exportDataButton;
 
     // Human-readable measurement summary
     juce::GroupComponent resultsSummaryGroup;
@@ -109,6 +119,9 @@ private:
     // Plugin instance
     std::unique_ptr<juce::AudioPluginInstance> pluginInstance;
     std::map<juce::String, juce::AudioProcessorParameter*> parameterMap;
+
+    std::vector<PendingExportDataset> pendingExportDatasets;
+    std::mutex pendingExportMutex;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
