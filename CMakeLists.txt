@@ -26,7 +26,7 @@ elseif(PLUGIN_ANALYSER_USE_FETCH_JUCE)
     FetchContent_Declare(
         juce
         GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-        GIT_TAG 8.0.0
+        GIT_TAG 8.0.13
     )
     FetchContent_MakeAvailable(juce)
 else()
@@ -55,6 +55,7 @@ set(SOURCES
     src/RunConfig.h
     src/BlockContext.h
     src/Analyzer.h
+    src/MeasurementResult.h
     src/RawCsvAnalyzer.cpp
     src/RawCsvAnalyzer.h
     src/RmsPeakAnalyzer.cpp
@@ -80,6 +81,7 @@ target_compile_definitions(PluginAnalyser
         JUCE_DISPLAY_SPLASH_SCREEN=0
         JUCE_USE_DARK_SPLASH_SCREEN=0
         JUCE_PLUGINHOST_VST3=1
+        JUCE_PLUGINHOST_AU=0
 )
 
 # Add DEBUG definition for debug builds (for dev-only defaults)
@@ -120,6 +122,7 @@ add_executable(plugin_measure_grid_cli src/main_cli.cpp
     src/SignalGenerator.cpp src/SignalGenerator.h
     src/BucketSpec.cpp src/BucketSpec.h
     src/RunConfig.h src/BlockContext.h src/Analyzer.h
+    src/MeasurementResult.h
     src/RawCsvAnalyzer.cpp src/RawCsvAnalyzer.h
     src/RmsPeakAnalyzer.cpp src/RmsPeakAnalyzer.h
     src/TransferCurveAnalyzer.cpp src/TransferCurveAnalyzer.h
@@ -134,6 +137,7 @@ target_compile_definitions(plugin_measure_grid_cli
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_PLUGINHOST_VST3=1
+        JUCE_PLUGINHOST_AU=0
 )
 
 target_link_libraries(plugin_measure_grid_cli
