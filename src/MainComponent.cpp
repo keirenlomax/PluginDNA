@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "RmsPeakAnalyzer.h"
 #include "MeasurementConfigComponent.h"
 #include "ParameterConfigComponent.h"
 #include <thread>
@@ -499,13 +500,95 @@ void MainComponent::runMeasurement() {
 
             // Finish analyzers
             std::cerr << "[Measurement] Finishing analyzers..." << std::endl;
+            // Finish the original analysers exactly as before.
             for (auto& analyzer : analyzers) {
                 analyzer->finish(outDir);
             }
+
             std::cerr << "[Measurement] All analyzers finished" << std::endl;
 
-            juce::MessageManager::callAsync([this]() {
-                progressLabel.setText("Measurement complete!", juce::dontSendNotification);
+            // Prove that all five existing outputs are available to the GUI.
+            auto countCsvRows = [](const juce::File& file) -> int {
+                if (!file.existsAsFile())
+                    return -1;
+
+                juce::StringArray lines;
+                file.readLines(lines);
+
+                // Remove the CSV header from the displayed data-row count.
+                return juce::jmax(0, lines.size() - 1);
+            };
+
+            auto findCsv = [&outDir](const juce::String& namePart) {
+                const auto files =
+                    outDir.findChildFiles(
+                        juce::File::findFiles,
+                        false,
+                        "*.csv");
+
+                for (const auto& file : files) {
+                    if (file.getFileName().containsIgnoreCase(namePart))
+                        return file;
+                }
+
+                return juce::File();
+            };
+
+            const auto rawCsvFile =
+                findCsv("raw");
+
+            const auto rmsPeakFile =
+                findCsv("rms_peak");
+
+            const auto transferCurveFile =
+                findCsv("transfer_curves");
+
+            const auto linearResponseFile =
+                findCsv("linear_response");
+
+            const auto thdFile =
+                findCsv("thd");
+
+            const int rawRows =
+                countCsvRows(rawCsvFile);
+
+            const int rmsPeakRows =
+                countCsvRows(rmsPeakFile);
+
+            const int transferCurveRows =
+                countCsvRows(transferCurveFile);
+
+            const int linearResponseRows =
+                countCsvRows(linearResponseFile);
+
+            const int thdRows =
+                countCsvRows(thdFile);
+
+            auto status = [](const juce::String& name, int rows) {
+                if (rows < 0)
+                    return name + ": missing";
+
+                return name + ": " +
+                       juce::String(rows) +
+                       " rows";
+            };
+
+            const juce::String dataPipeMessage =
+                status("RAW", rawRows) + " | " +
+                status("RMS/PEAK", rmsPeakRows) + " | " +
+                status("TRANSFER", transferCurveRows) + " | " +
+                status("LINEAR", linearResponseRows) + " | " +
+                status("THD", thdRows);
+
+            std::cerr
+                << "[DataPipe] "
+                << dataPipeMessage
+                << std::endl;
+
+            juce::MessageManager::callAsync([this, dataPipeMessage]() {
+                progressLabel.setText(
+                    dataPipeMessage,
+                    juce::dontSendNotification);
                 progress = 1.0;
                 progressBar.repaint();
                 runMeasurementButton.setEnabled(true);
