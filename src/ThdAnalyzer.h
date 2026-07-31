@@ -4,6 +4,7 @@
 #include "JuceHeader.h"
 #include "MeasurementResult.h"
 
+#include <array>
 #include <complex>
 #include <map>
 #include <memory>
@@ -34,10 +35,17 @@ struct ThdAnalyzer : public Analyzer
     }
 
 private:
+    struct HarmonicMeasurement
+    {
+        int64_t centreSample = 0;
+        double thd = 0.0;
+        std::array<double, 9> harmonicRatios {};
+    };
+
     struct RunThdData
     {
         std::vector<float> buffer;
-        std::vector<std::pair<int64_t, double>> thdResults;
+        std::vector<HarmonicMeasurement> thdResults;
         std::map<juce::String, float> paramValues;
         float inputGainDb = 0.0f;
         double sampleRate = 48000.0;
@@ -46,9 +54,10 @@ private:
     void buildResult();
     void processFFTWindow(RunThdData& data, int64_t centreSample);
     void applyHannWindow(std::vector<float>& buffer);
-    double computeTHD(
+    HarmonicMeasurement computeHarmonics(
         const std::vector<std::complex<float>>& fftResult,
-        double sampleRate);
+        double sampleRate,
+        int64_t centreSample);
 
     std::map<int, RunThdData> perRunData;
     int fftSize;

@@ -161,12 +161,6 @@ void TransferCurveAnalyzer::finish(const juce::File& outDir)
 
         out << '\n';
     }
-
-    std::cout
-        << "TransferCurve in-memory result: "
-        << result.getRowCount()
-        << " rows"
-        << std::endl;
 }
 
 std::unique_ptr<Analyzer> createTransferCurveAnalyzer(

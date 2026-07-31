@@ -135,12 +135,6 @@ void RawCsvAnalyzer::finish(const juce::File& outDir)
         csvFile->close();
         csvFile.reset();
     }
-
-    std::cout
-        << "RawCsv in-memory result: "
-        << result.getRowCount()
-        << " rows"
-        << std::endl;
 }
 
 std::unique_ptr<Analyzer> createRawCsvAnalyzer(

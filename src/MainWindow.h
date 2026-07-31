@@ -9,9 +9,11 @@ public:
     ~MainWindow() override;
 
     void closeButtonPressed() override;
+    void resized() override;
 
 private:
-    std::unique_ptr<MainComponent> mainComponent;
+    juce::Viewport* viewport = nullptr;
+    MainComponent* mainComponent = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainWindow)
 };

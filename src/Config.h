@@ -15,7 +15,7 @@ struct ParameterBucketConfig {
 
 struct Config {
     juce::String pluginPath;
-    double sampleRate = 48000.0;
+    double sampleRate = 96000.0;
     double seconds = 5.0;
     int blockSize = 256;
     juce::String signalType; // "sine", "noise", "sweep"

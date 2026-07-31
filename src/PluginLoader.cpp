@@ -37,12 +37,7 @@ std::unique_ptr<juce::AudioPluginInstance> loadPluginInstance(const juce::File& 
         }
     }
 
-    // Debug: Check what formats were added
-    int numFormats = formatManager.getNumFormats();
-    std::cerr << "Format manager has " << numFormats << " format(s)" << std::endl;
-    for (int i = 0; i < numFormats; ++i) {
-        std::cerr << "  Format " << i << ": " << formatManager.getFormat(i)->getName() << std::endl;
-    }
+    const int numFormats = formatManager.getNumFormats();
 
     // Try to find the plugin by scanning
     bool foundFormat = false;

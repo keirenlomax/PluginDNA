@@ -35,6 +35,8 @@ private:
     void runMeasurement();
     Config buildConfigFromUI();
     void showError(const juce::String& message);
+    void clearResultsSummary();
+    juce::String buildSummaryText() const;
 
     // Plugin selection
     juce::Label pluginPathLabel;
@@ -65,6 +67,36 @@ private:
     juce::Label outputPathLabel;
     juce::TextEditor outputPathEditor;
     juce::TextButton browseOutputButton;
+
+    // Human-readable measurement summary
+    juce::GroupComponent resultsSummaryGroup;
+    juce::TextButton copySummaryButton;
+    juce::Label identityRoleLabel;
+    juce::Label identityWhyLabel;
+    juce::Label identityWatchLabel;
+    juce::Label levelSummaryLabel;
+    juce::Label peakSummaryLabel;
+    juce::Label dynamicsSummaryLabel;
+    juce::Label harmonicSummaryLabel;
+    juce::Label harmonicBalanceLabel;
+    juce::Label harmonicGrowthLabel;
+    juce::Label toneBassLabel;
+    juce::Label toneMidLabel;
+    juce::Label toneTrebleLabel;
+    juce::Label toneLargestLabel;
+    juce::Label behaviourSummaryLabel;
+    juce::Label behaviourChangesLabel;
+    juce::Label operatingRangeLabel;
+    juce::Label characterStartsLabel;
+    juce::Label underStressLabel;
+    juce::Label nonlinearityLabel;
+    juce::Label curveBehaviourLabel;
+    juce::Label waveformShapeLabel;
+    juce::Label waveformKneeLabel;
+    juce::Label waveformStyleLabel;
+    juce::Label temporalResponseLabel;
+    juce::Label temporalAttackLabel;
+    juce::Label temporalAfterLabel;
 
     // Run button
     juce::TextButton runMeasurementButton;

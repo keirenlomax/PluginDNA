@@ -31,7 +31,7 @@ MeasurementConfigComponent::MeasurementConfigComponent() {
 
     sampleRateLabel.setText("Sample Rate:", juce::dontSendNotification);
     addAndMakeVisible(sampleRateLabel);
-    sampleRateEditor.setText("48000", juce::dontSendNotification);
+    sampleRateEditor.setText("96000", juce::dontSendNotification);
     sampleRateEditor.addListener(this);
     addAndMakeVisible(sampleRateEditor);
 
@@ -49,7 +49,7 @@ MeasurementConfigComponent::MeasurementConfigComponent() {
 
     inputGainLabel.setText("Input Gain Buckets (dB, comma-separated):", juce::dontSendNotification);
     addAndMakeVisible(inputGainLabel);
-    inputGainEditor.setText("-24.0, -18.0, -12.0", juce::dontSendNotification);
+    inputGainEditor.setText("-18.0, -12.0, -6.0, -3.0", juce::dontSendNotification);
     inputGainEditor.addListener(this);
     addAndMakeVisible(inputGainEditor);
 

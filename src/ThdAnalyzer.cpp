@@ -38,46 +38,59 @@ void ThdAnalyzer::applyHannWindow(std::vector<float>& buffer)
     }
 }
 
-double ThdAnalyzer::computeTHD(
+ThdAnalyzer::HarmonicMeasurement ThdAnalyzer::computeHarmonics(
     const std::vector<std::complex<float>>& fftResult,
-    double sampleRate)
+    double sampleRate,
+    int64_t centreSample)
 {
+    HarmonicMeasurement measurement;
+    measurement.centreSample = centreSample;
+
     const double binHz = sampleRate / static_cast<double>(fftSize);
     const int fundamentalBin = static_cast<int>(
         std::round(fundamentalFreq / binHz));
 
     if (fundamentalBin <= 0 || fundamentalBin >= fftSize / 2)
-        return 0.0;
+        return measurement;
 
-    const float fundamentalMagnitude =
-        std::abs(fftResult[static_cast<std::size_t>(fundamentalBin)]);
+    // A Hann-windowed sine spreads across neighbouring bins unless the test
+    // frequency is perfectly coherent with the FFT. Integrating a small bin
+    // neighbourhood gives stable harmonic amplitudes without changing the
+    // existing test signal.
+    auto bandMagnitude = [&fftResult, this](int centreBin)
+    {
+        double power = 0.0;
+        for (int offset = -2; offset <= 2; ++offset)
+        {
+            const int bin = centreBin + offset;
+            if (bin <= 0 || bin >= fftSize / 2)
+                continue;
 
-    const double fundamentalPower =
-        static_cast<double>(fundamentalMagnitude * fundamentalMagnitude);
+            const double magnitude = std::abs(
+                fftResult[static_cast<std::size_t>(bin)]);
+            power += magnitude * magnitude;
+        }
+        return std::sqrt(power);
+    };
 
-    if (fundamentalPower <= 0.0)
-        return 0.0;
+    const double fundamentalMagnitude = bandMagnitude(fundamentalBin);
+    if (fundamentalMagnitude <= 1.0e-12)
+        return measurement;
 
     double harmonicPowerSum = 0.0;
-    const int maxHarmonic = std::min(
-        10,
-        (fftSize / 2) / fundamentalBin);
-
-    for (int harmonic = 2; harmonic <= maxHarmonic; ++harmonic)
+    for (int harmonic = 2; harmonic <= 10; ++harmonic)
     {
         const int harmonicBin = harmonic * fundamentalBin;
-
         if (harmonicBin >= fftSize / 2)
             break;
 
-        const float harmonicMagnitude =
-            std::abs(fftResult[static_cast<std::size_t>(harmonicBin)]);
-
-        harmonicPowerSum += static_cast<double>(
-            harmonicMagnitude * harmonicMagnitude);
+        const double ratio = bandMagnitude(harmonicBin) / fundamentalMagnitude;
+        measurement.harmonicRatios[static_cast<std::size_t>(harmonic - 2)] = ratio;
+        harmonicPowerSum += ratio * ratio;
     }
 
-    return std::sqrt(harmonicPowerSum / fundamentalPower);
+    measurement.thd = std::sqrt(harmonicPowerSum);
+    return measurement;
 }
 
 void ThdAnalyzer::processFFTWindow(
@@ -103,8 +116,8 @@ void ThdAnalyzer::processFFTWindow(
 
     fft.perform(fftResult.data(), fftResult.data(), false);
 
-    const double thd = computeTHD(fftResult, data.sampleRate);
-    data.thdResults.push_back({ centreSample, thd });
+    data.thdResults.push_back(
+        computeHarmonics(fftResult, data.sampleRate, centreSample));
     data.buffer.clear();
 }
 
@@ -141,6 +154,8 @@ void ThdAnalyzer::buildResult()
     result.columns.push_back("runId");
     result.columns.push_back("centreSample");
     result.columns.push_back("thd");
+    for (int harmonic = 2; harmonic <= 10; ++harmonic)
+        result.columns.push_back("h" + std::to_string(harmonic));
 
     for (const auto& paramName : paramNames)
         result.columns.push_back(paramName.toStdString());
@@ -149,14 +164,16 @@ void ThdAnalyzer::buildResult()
 
     for (const auto& [runId, data] : perRunData)
     {
-        for (const auto& [centreSample, thd] : data.thdResults)
+        for (const auto& measurement : data.thdResults)
         {
             std::vector<double> row;
             row.reserve(result.columns.size());
 
             row.push_back(static_cast<double>(runId));
-            row.push_back(static_cast<double>(centreSample));
-            row.push_back(thd);
+            row.push_back(static_cast<double>(measurement.centreSample));
+            row.push_back(measurement.thd);
+            for (double ratio : measurement.harmonicRatios)
+                row.push_back(ratio);
 
             for (const auto& paramName : paramNames)
             {
@@ -221,12 +238,6 @@ void ThdAnalyzer::finish(const juce::File& outDir)
 
         out << '\n';
     }
-
-    std::cout
-        << "Thd in-memory result: "
-        << result.getRowCount()
-        << " rows"
-        << std::endl;
 }
 
 std::unique_ptr<Analyzer> createThdAnalyzer(
