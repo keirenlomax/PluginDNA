@@ -150,14 +150,24 @@ void RmsPeakAnalyzer::buildResult()
 
 void RmsPeakAnalyzer::finish(const juce::File& outDir)
 {
+    std::cerr << "[RmsPeak] finish() entered" << std::endl;
+
     // First create the PluginDNA in-memory result.
     buildResult();
+
+    std::cerr << "[RmsPeak] buildResult complete" << std::endl;
 
     // Keep the existing CSV export.
     const juce::String filename =
         "grid_rms_peak_" + signalType.toLowerCase() + ".csv";
 
     const juce::File csvFile = outDir.getChildFile(filename);
+
+    std::cerr
+        << "[RmsPeak] opening CSV: "
+        << csvFile.getFullPathName()
+        << std::endl;
+
     std::ofstream out(csvFile.getFullPathName().toStdString());
 
     if (!out.is_open())
@@ -198,6 +208,8 @@ void RmsPeakAnalyzer::finish(const juce::File& outDir)
 
         out << "\n";
     }
+
+    std::cerr << "[RmsPeak] writing finished" << std::endl;
 
     std::cout
         << "RmsPeak in-memory result: "

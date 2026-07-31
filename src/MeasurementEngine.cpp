@@ -224,8 +224,4 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
         }
     }
 
-    // Finish all analyzers
-    for (auto& analyzer : analyzers) {
-        analyzer->finish(outDir);
-    }
 }
