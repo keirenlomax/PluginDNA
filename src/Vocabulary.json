@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "status": "calibration",
+  "principle": "Describe the audible consequence, not the algorithm.",
+  "roles": [
+    "Clean Gain",
+    "Tone Shaper",
+    "Harmonic Enhancer",
+    "Saturator",
+    "Tape Colour",
+    "Transformer Colour",
+    "Console Colour",
+    "Transient Processor",
+    "Soft Clipper",
+    "Hard Clipper"
+  ],
+  "character": [
+    "Sweet",
+    "Warm",
+    "Dense",
+    "Fat",
+    "Thin",
+    "Forward",
+    "Receding",
+    "Present",
+    "Airy",
+    "Open",
+    "Smooth",
+    "Focused",
+    "Punchy",
+    "Glue",
+    "Bloom",
+    "Big",
+    "Full",
+    "Articulate"
+  ],
+  "behaviour": [
+    "Transparent",
+    "Static",
+    "Responsive",
+    "Progressive",
+    "Stateful",
+    "Nonlinear"
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "status": "provisional",
+  "minimumConfidenceToShow": 0.65,
+  "rules": {
+    "Sweet": {
+      "positive": {
+        "secondHarmonicDominance": 1.00,
+        "evenHarmonicBalance": 0.75,
+        "minimalCrestChange": 0.35,
+        "minimalToneShift": 0.35,
+        "stableCharacterWithDrive": 0.25
+      },
+      "negative": {
+        "denseHighOrderHarmonics": 0.65,
+        "strongPeakReduction": 0.35
+      },
+      "calibratedBy": ["Sweeten"]
+    },
+    "Dense": {
+      "positive": {
+        "harmonicGrowth": 0.75,
+        "rmsGrowth": 0.55,
+        "crestReduction": 0.45,
+        "progressiveDriveResponse": 0.55,
+        "limitedHighFrequencyLoss": 0.25
+      },
+      "negative": {
+        "mostlyStatic": 0.40
+      },
+      "calibratedBy": ["Density"]
+    },
+    "Forward": {
+      "positive": {
+        "harmonicGrowth": 0.45,
+        "attackPreserved": 0.40,
+        "limitedHighFrequencyLoss": 0.35,
+        "moderateRmsGrowth": 0.30
+      },
+      "negative": {
+        "strongTransientSoftening": 0.45,
+        "strongHighFrequencyLoss": 0.45
+      },
+      "calibratedBy": ["Density"]
+    },
+    "Present": {
+      "positive": {
+        "attackPreserved": 0.85,
+        "statefulResponse": 0.70,
+        "upperHarmonicGrowth": 0.45,
+        "limitedCrestReduction": 0.30
+      },
+      "negative": {
+        "strongTransientSoftening": 0.55
+      },
+      "calibratedBy": ["Spiral2"]
+    },
+    "Articulate": {
+      "positive": {
+        "attackPreserved": 0.90,
+        "statefulResponse": 0.55,
+        "limitedCrestReduction": 0.35
+      },
+      "negative": {
+        "strongTransientSoftening": 0.75,
+        "longRinging": 0.30
+      },
+      "calibratedBy": ["Spiral2"]
+    },
+    "Airy": {
+      "positive": {
+        "attackOvershoot": 0.45,
+        "attackPreserved": 0.40,
+        "upperHarmonicGrowth": 0.35,
+        "highFrequencyLift": 0.55
+      },
+      "negative": {
+        "strongHighFrequencyLoss": 0.90
+      },
+      "calibratedBy": ["Spiral2"]
+    }
+  },
+  "notes": [
+    "Weights are intentionally provisional until all eight Airwindows calibration plugins are measured.",
+    "No rule may inspect a plugin name.",
+    "A transfer-curve edge case must not override stronger harmonic, dynamic, spectral or temporal evidence."
+  ]
+}
