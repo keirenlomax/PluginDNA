@@ -1,145 +1,245 @@
 #include "ThdAnalyzer.h"
 #include "JuceHeader.h"
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iostream>
 
-ThdAnalyzer::ThdAnalyzer(const juce::File& outDir, int fftSize, double fundamentalFreq,
-                         const std::vector<juce::String>& paramNames, const juce::String& signalType)
-    : fftSize(fftSize), fundamentalFreq(fundamentalFreq), paramNames(paramNames), outputDir(outDir),
-      signalType(signalType) {}
+ThdAnalyzer::ThdAnalyzer(
+    const juce::File& outDir,
+    int fftSize,
+    double fundamentalFreq,
+    const std::vector<juce::String>& paramNames,
+    const juce::String& signalType)
+    : fftSize(fftSize),
+      fundamentalFreq(fundamentalFreq),
+      paramNames(paramNames),
+      outputDir(outDir),
+      signalType(signalType)
+{
+}
 
-ThdAnalyzer::~ThdAnalyzer() {}
+ThdAnalyzer::~ThdAnalyzer() = default;
 
-void ThdAnalyzer::applyHannWindow(std::vector<float>& buffer) {
-    const int N = (int)buffer.size();
-    for (int i = 0; i < N; ++i) {
-        float window = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * (float)i / (float)(N - 1)));
-        buffer[i] *= window;
+void ThdAnalyzer::applyHannWindow(std::vector<float>& buffer)
+{
+    const int N = static_cast<int>(buffer.size());
+
+    for (int i = 0; i < N; ++i)
+    {
+        const float window = 0.5f *
+            (1.0f - std::cos(
+                2.0f * juce::MathConstants<float>::pi *
+                static_cast<float>(i) /
+                static_cast<float>(N - 1)));
+
+        buffer[static_cast<std::size_t>(i)] *= window;
     }
 }
 
-double ThdAnalyzer::computeTHD(const std::vector<std::complex<float>>& fftResult, double sampleRate) {
-    const double binHz = sampleRate / (double)fftSize;
-    const int k0 = (int)std::round(fundamentalFreq / binHz);
+double ThdAnalyzer::computeTHD(
+    const std::vector<std::complex<float>>& fftResult,
+    double sampleRate)
+{
+    const double binHz = sampleRate / static_cast<double>(fftSize);
+    const int fundamentalBin = static_cast<int>(
+        std::round(fundamentalFreq / binHz));
 
-    if (k0 < 0 || k0 >= fftSize / 2)
+    if (fundamentalBin <= 0 || fundamentalBin >= fftSize / 2)
         return 0.0;
 
-    // Fundamental power
-    float fundamentalMag = std::abs(fftResult[k0]);
-    double P1 = (double)(fundamentalMag * fundamentalMag);
+    const float fundamentalMagnitude =
+        std::abs(fftResult[static_cast<std::size_t>(fundamentalBin)]);
 
-    if (P1 <= 0.0)
+    const double fundamentalPower =
+        static_cast<double>(fundamentalMagnitude * fundamentalMagnitude);
+
+    if (fundamentalPower <= 0.0)
         return 0.0;
 
-    // Harmonic powers
     double harmonicPowerSum = 0.0;
-    const int maxHarmonic = std::min(10, (fftSize / 2) / k0);
+    const int maxHarmonic = std::min(
+        10,
+        (fftSize / 2) / fundamentalBin);
 
-    for (int h = 2; h <= maxHarmonic; ++h) {
-        int kh = h * k0;
-        if (kh >= fftSize / 2)
+    for (int harmonic = 2; harmonic <= maxHarmonic; ++harmonic)
+    {
+        const int harmonicBin = harmonic * fundamentalBin;
+
+        if (harmonicBin >= fftSize / 2)
             break;
 
-        float harmonicMag = std::abs(fftResult[kh]);
-        double harmonicPower = (double)(harmonicMag * harmonicMag);
-        harmonicPowerSum += harmonicPower;
+        const float harmonicMagnitude =
+            std::abs(fftResult[static_cast<std::size_t>(harmonicBin)]);
+
+        harmonicPowerSum += static_cast<double>(
+            harmonicMagnitude * harmonicMagnitude);
     }
 
-    // THD as ratio
-    double thd = std::sqrt(harmonicPowerSum / P1);
-    return thd;
+    return std::sqrt(harmonicPowerSum / fundamentalPower);
 }
 
-void ThdAnalyzer::processFFTWindow(RunThdData& data, int64_t centreSample) {
-    if ((int)data.buffer.size() < fftSize)
+void ThdAnalyzer::processFFTWindow(
+    RunThdData& data,
+    int64_t centreSample)
+{
+    if (static_cast<int>(data.buffer.size()) < fftSize)
         return;
 
-    // Apply window
     applyHannWindow(data.buffer);
 
-    // Perform FFT
-    juce::dsp::FFT fft((int)std::log2(fftSize));
-    std::vector<std::complex<float>> fftResult(fftSize);
+    juce::dsp::FFT fft(static_cast<int>(std::log2(fftSize)));
+    std::vector<std::complex<float>> fftResult(
+        static_cast<std::size_t>(fftSize));
 
-    // Copy to complex buffer
-    for (int i = 0; i < fftSize; ++i) {
-        fftResult[i] = std::complex<float>(data.buffer[i], 0.0f);
+    for (int i = 0; i < fftSize; ++i)
+    {
+        fftResult[static_cast<std::size_t>(i)] =
+            std::complex<float>(
+                data.buffer[static_cast<std::size_t>(i)],
+                0.0f);
     }
 
-    // Perform FFT (in-place)
     fft.perform(fftResult.data(), fftResult.data(), false);
 
-    // Compute THD
-    double thd = computeTHD(fftResult, data.sampleRate);
-    data.thdResults.push_back({centreSample, thd});
-
-    // Clear buffer for next window
+    const double thd = computeTHD(fftResult, data.sampleRate);
+    data.thdResults.push_back({ centreSample, thd });
     data.buffer.clear();
 }
 
-void ThdAnalyzer::processBlock(const BlockContext& ctx) {
+void ThdAnalyzer::processBlock(const BlockContext& ctx)
+{
     auto& data = perRunData[ctx.runId];
 
-    // Initialize on first block
-    if (data.buffer.empty()) {
+    if (data.buffer.empty() && data.thdResults.empty())
+    {
         data.paramValues = ctx.paramNamedValues;
         data.inputGainDb = ctx.inputGainDb;
         data.sampleRate = ctx.sampleRate;
     }
 
-    // Accumulate samples
-    for (int i = 0; i < ctx.numSamples; ++i) {
+    for (int i = 0; i < ctx.numSamples; ++i)
+    {
         data.buffer.push_back(ctx.outL[i]);
 
-        // Process FFT window when we have enough samples
-        if ((int)data.buffer.size() >= fftSize) {
-            int64_t centreSample = ctx.firstSample + i - fftSize / 2;
+        if (static_cast<int>(data.buffer.size()) >= fftSize)
+        {
+            const int64_t centreSample =
+                ctx.firstSample + i - fftSize / 2;
+
             processFFTWindow(data, centreSample);
         }
     }
 }
 
-void ThdAnalyzer::finish(const juce::File& outDir) {
-    juce::String filename = "grid_thd_" + signalType.toLowerCase() + ".csv";
-    juce::File csvFile = outDir.getChildFile(filename);
-    std::ofstream out(csvFile.getFullPathName().toStdString());
+void ThdAnalyzer::buildResult()
+{
+    result.clear();
+    result.analyserName = "Thd";
 
-    if (!out.is_open()) {
-        std::cerr << "Failed to open " << filename.toStdString() << " for writing" << std::endl;
-        return;
-    }
+    result.columns.push_back("runId");
+    result.columns.push_back("centreSample");
+    result.columns.push_back("thd");
 
-    // Header
-    out << "runId,centreSample,thd";
-    for (const auto& paramName : paramNames) {
-        out << "," << paramName.toStdString();
-    }
-    out << ",inputGainDb\n";
+    for (const auto& paramName : paramNames)
+        result.columns.push_back(paramName.toStdString());
 
-    // Data rows
-    for (const auto& [runId, data] : perRunData) {
-        for (const auto& [centreSample, thd] : data.thdResults) {
-            out << runId << "," << centreSample << "," << thd;
+    result.columns.push_back("inputGainDb");
 
-            // Parameter values
-            for (const auto& paramName : paramNames) {
-                float value = 0.0f;
-                auto it = data.paramValues.find(paramName);
-                if (it != data.paramValues.end())
-                    value = it->second;
-                out << "," << value;
+    for (const auto& [runId, data] : perRunData)
+    {
+        for (const auto& [centreSample, thd] : data.thdResults)
+        {
+            std::vector<double> row;
+            row.reserve(result.columns.size());
+
+            row.push_back(static_cast<double>(runId));
+            row.push_back(static_cast<double>(centreSample));
+            row.push_back(thd);
+
+            for (const auto& paramName : paramNames)
+            {
+                double value = 0.0;
+                const auto valueIt = data.paramValues.find(paramName);
+
+                if (valueIt != data.paramValues.end())
+                    value = static_cast<double>(valueIt->second);
+
+                row.push_back(value);
             }
 
-            out << "," << data.inputGainDb << "\n";
+            row.push_back(static_cast<double>(data.inputGainDb));
+            result.rows.push_back(std::move(row));
         }
     }
 }
 
-std::unique_ptr<Analyzer> createThdAnalyzer(const juce::File& outDir, int fftSize, double fundamentalFreq,
-                                            const std::vector<juce::String>& paramNames,
-                                            const juce::String& signalType) {
-    return std::make_unique<ThdAnalyzer>(outDir, fftSize, fundamentalFreq, paramNames, signalType);
+void ThdAnalyzer::finish(const juce::File& outDir)
+{
+    buildResult();
+
+    // Keep the existing CSV export, now written from the in-memory dataset.
+    const juce::String filename =
+        "grid_thd_" + signalType.toLowerCase() + ".csv";
+
+    const juce::File csvFile = outDir.getChildFile(filename);
+    std::ofstream out(csvFile.getFullPathName().toStdString());
+
+    if (!out.is_open())
+    {
+        std::cerr
+            << "Failed to open "
+            << filename.toStdString()
+            << " for writing"
+            << std::endl;
+
+        return;
+    }
+
+    for (std::size_t column = 0;
+         column < result.columns.size();
+         ++column)
+    {
+        if (column > 0)
+            out << ',';
+
+        out << result.columns[column];
+    }
+
+    out << '\n';
+
+    for (const auto& row : result.rows)
+    {
+        for (std::size_t column = 0; column < row.size(); ++column)
+        {
+            if (column > 0)
+                out << ',';
+
+            out << row[column];
+        }
+
+        out << '\n';
+    }
+
+    std::cout
+        << "Thd in-memory result: "
+        << result.getRowCount()
+        << " rows"
+        << std::endl;
+}
+
+std::unique_ptr<Analyzer> createThdAnalyzer(
+    const juce::File& outDir,
+    int fftSize,
+    double fundamentalFreq,
+    const std::vector<juce::String>& paramNames,
+    const juce::String& signalType)
+{
+    return std::make_unique<ThdAnalyzer>(
+        outDir,
+        fftSize,
+        fundamentalFreq,
+        paramNames,
+        signalType);
 }
