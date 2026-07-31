@@ -84,56 +84,123 @@ void LinearResponseAnalyzer::processBlock(const BlockContext& ctx) {
     }
 }
 
-void LinearResponseAnalyzer::finish(const juce::File& outDir) {
-    juce::String filename = "grid_linear_response_" + signalType.toLowerCase() + ".csv";
-    juce::File csvFile = outDir.getChildFile(filename);
-    std::ofstream out(csvFile.getFullPathName().toStdString());
+void LinearResponseAnalyzer::buildResult()
+{
+    result.clear();
+    result.analyserName = "LinearResponse";
 
-    if (!out.is_open()) {
-        std::cerr << "Failed to open " << filename.toStdString() << " for writing" << std::endl;
-        return;
-    }
+    result.columns.push_back("runId");
+    result.columns.push_back("freqHz");
+    result.columns.push_back("magDb");
 
-    // Header
-    out << "runId,freqHz,magDb";
-    for (const auto& paramName : paramNames) {
-        out << "," << paramName.toStdString();
-    }
-    out << ",inputGainDb\n";
+    for (const auto& paramName : paramNames)
+        result.columns.push_back(paramName.toStdString());
 
-    // Data rows
-    for (const auto& [runId, spectrum] : perRunSpectra) {
+    result.columns.push_back("inputGainDb");
+
+    for (const auto& [runId, spectrum] : perRunSpectra)
+    {
         if (spectrum.numAverages == 0)
             continue;
 
         const int numBins = fftSize / 2;
-        const double binHz = spectrum.sampleRate / (double)fftSize;
+        const double binHz = spectrum.sampleRate / static_cast<double>(fftSize);
 
-        for (int k = 0; k < numBins; ++k) {
-            double magIn = std::sqrt(spectrum.sumInMagSq[k] / spectrum.numAverages);
-            double magOut = std::sqrt(spectrum.sumOutMagSq[k] / spectrum.numAverages);
+        for (int bin = 0; bin < numBins; ++bin)
+        {
+            const double magIn = std::sqrt(
+                spectrum.sumInMagSq[static_cast<std::size_t>(bin)]
+                / static_cast<double>(spectrum.numAverages));
+
+            const double magOut = std::sqrt(
+                spectrum.sumOutMagSq[static_cast<std::size_t>(bin)]
+                / static_cast<double>(spectrum.numAverages));
 
             if (magIn <= 0.0)
                 continue;
 
-            double H = magOut / magIn;
-            double magDb = 20.0 * std::log10(std::max(H, 1e-10));
-            double freqHz = (double)k * binHz;
+            const double transferMagnitude = magOut / magIn;
+            const double magDb = 20.0 * std::log10(
+                std::max(transferMagnitude, 1.0e-10));
 
-            out << runId << "," << freqHz << "," << magDb;
+            const double freqHz = static_cast<double>(bin) * binHz;
 
-            // Parameter values
-            for (const auto& paramName : paramNames) {
-                float value = 0.0f;
-                auto it = spectrum.paramValues.find(paramName);
-                if (it != spectrum.paramValues.end())
-                    value = it->second;
-                out << "," << value;
+            std::vector<double> row;
+            row.reserve(result.columns.size());
+
+            row.push_back(static_cast<double>(runId));
+            row.push_back(freqHz);
+            row.push_back(magDb);
+
+            for (const auto& paramName : paramNames)
+            {
+                double value = 0.0;
+                const auto valueIt = spectrum.paramValues.find(paramName);
+
+                if (valueIt != spectrum.paramValues.end())
+                    value = static_cast<double>(valueIt->second);
+
+                row.push_back(value);
             }
 
-            out << "," << spectrum.inputGainDb << "\n";
+            row.push_back(static_cast<double>(spectrum.inputGainDb));
+            result.rows.push_back(std::move(row));
         }
     }
+}
+
+void LinearResponseAnalyzer::finish(const juce::File& outDir)
+{
+    buildResult();
+
+    // Keep the existing CSV export, now written from the in-memory dataset.
+    const juce::String filename =
+        "grid_linear_response_" + signalType.toLowerCase() + ".csv";
+
+    const juce::File csvFile = outDir.getChildFile(filename);
+    std::ofstream out(csvFile.getFullPathName().toStdString());
+
+    if (!out.is_open())
+    {
+        std::cerr
+            << "Failed to open "
+            << filename.toStdString()
+            << " for writing"
+            << std::endl;
+
+        return;
+    }
+
+    for (std::size_t column = 0;
+         column < result.columns.size();
+         ++column)
+    {
+        if (column > 0)
+            out << ',';
+
+        out << result.columns[column];
+    }
+
+    out << '\n';
+
+    for (const auto& row : result.rows)
+    {
+        for (std::size_t column = 0; column < row.size(); ++column)
+        {
+            if (column > 0)
+                out << ',';
+
+            out << row[column];
+        }
+
+        out << '\n';
+    }
+
+    std::cout
+        << "LinearResponse in-memory result: "
+        << result.getRowCount()
+        << " rows"
+        << std::endl;
 }
 
 std::unique_ptr<Analyzer> createLinearResponseAnalyzer(const juce::File& outDir, int fftSize,
