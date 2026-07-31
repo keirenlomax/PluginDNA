@@ -1,0 +1,42 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format
+        description: Format C++ code with clang-format
+        entry: bash
+        language: system
+        types: [text]
+        files: \.(cpp|h|hpp|c|cc|cxx)$
+        args:
+          - '-c'
+          - |
+            if command -v clang-format >/dev/null 2>&1; then
+              MODIFIED=0
+              for file in "$@"; do
+                if [ -f "$file" ]; then
+                  if ! clang-format "$file" | diff -q "$file" - >/dev/null 2>&1; then
+                    clang-format -i "$file"
+                    MODIFIED=1
+                  fi
+                fi
+              done
+              exit $MODIFIED
+            else
+              echo "Warning: clang-format not found, skipping formatting"
+              exit 0
+            fi
+        pass_filenames: true
