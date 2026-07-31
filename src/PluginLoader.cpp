@@ -13,7 +13,9 @@ std::unique_ptr<juce::AudioPluginInstance> loadPluginInstance(const juce::File& 
     }
 
     juce::AudioPluginFormatManager formatManager;
-    formatManager.addDefaultFormats();
+    #if JUCE_PLUGINHOST_VST3
+    formatManager.addFormat(std::make_unique<juce::VST3PluginFormat>());
+#endif
 
     juce::String errorMessage;
     juce::PluginDescription description;
