@@ -49,11 +49,29 @@ MeasurementConfigComponent::MeasurementConfigComponent() {
     blockSizeEditor.addListener(this);
     addAndMakeVisible(blockSizeEditor);
 
-    inputGainLabel.setText("Input Gain Buckets (dB, comma-separated):", juce::dontSendNotification);
+    inputGainLabel.setText("Input Level Range (dBFS)", juce::dontSendNotification);
     addAndMakeVisible(inputGainLabel);
-    inputGainEditor.setText("-18.0, -12.0, -6.0, -3.0", juce::dontSendNotification);
-    inputGainEditor.addListener(this);
-    addAndMakeVisible(inputGainEditor);
+
+    inputGainStartLabel.setText("Start", juce::dontSendNotification);
+    addAndMakeVisible(inputGainStartLabel);
+    inputGainStartEditor.setText("-18", juce::dontSendNotification);
+    inputGainStartEditor.addListener(this);
+    addAndMakeVisible(inputGainStartEditor);
+
+    inputGainEndLabel.setText("End", juce::dontSendNotification);
+    addAndMakeVisible(inputGainEndLabel);
+    inputGainEndEditor.setText("0", juce::dontSendNotification);
+    inputGainEndEditor.addListener(this);
+    addAndMakeVisible(inputGainEndEditor);
+
+    inputGainStepLabel.setText("Step", juce::dontSendNotification);
+    addAndMakeVisible(inputGainStepLabel);
+    inputGainStepCombo.addItem("1 dB", 1);
+    inputGainStepCombo.addItem("3 dB", 3);
+    inputGainStepCombo.addItem("6 dB", 6);
+    inputGainStepCombo.setSelectedId(3);
+    inputGainStepCombo.addListener(this);
+    addAndMakeVisible(inputGainStepCombo);
 
     analysisSuiteGroup.setText("Analysis Suite");
     addAndMakeVisible(analysisSuiteGroup);
@@ -213,13 +231,20 @@ void MeasurementConfigComponent::resized() {
     bounds.removeFromTop(gap);
 
     inputGainLabel.setBounds(bounds.removeFromTop(24));
-    inputGainEditor.setBounds(bounds.removeFromTop(rowHeight));
+    auto gainRow = bounds.removeFromTop(rowHeight);
+    inputGainStartLabel.setBounds(gainRow.removeFromLeft(42));
+    inputGainStartEditor.setBounds(gainRow.removeFromLeft(58));
+    gainRow.removeFromLeft(10);
+    inputGainEndLabel.setBounds(gainRow.removeFromLeft(32));
+    inputGainEndEditor.setBounds(gainRow.removeFromLeft(58));
+    gainRow.removeFromLeft(10);
+    inputGainStepLabel.setBounds(gainRow.removeFromLeft(34));
+    inputGainStepCombo.setBounds(gainRow.removeFromLeft(82));
 }
 
 void MeasurementConfigComponent::comboBoxChanged(juce::ComboBox* comboBox) {
-    if (comboBox == &signalTypeCombo) {
+    if (comboBox == &signalTypeCombo)
         updateUI();
-    }
 }
 
 void MeasurementConfigComponent::textEditorTextChanged(juce::TextEditor& editor) {
@@ -275,14 +300,25 @@ void MeasurementConfigComponent::fillConfig(Config& config) {
     config.seconds = secondsEditor.getText().getDoubleValue();
     config.blockSize = blockSizeEditor.getText().getIntValue();
 
-    // Parse input gain buckets
-    juce::StringArray tokens;
-    tokens.addTokens(inputGainEditor.getText(), ",", "");
+    // Generate one canonical input-level grid for the entire analyser suite.
+    // Start/end can be edited; step is deliberately constrained to 1, 3 or 6 dB.
+    double gainStart = inputGainStartEditor.getText().getDoubleValue();
+    double gainEnd = inputGainEndEditor.getText().getDoubleValue();
+    double gainStep = static_cast<double>(inputGainStepCombo.getSelectedId());
+    if (gainStep != 1.0 && gainStep != 3.0 && gainStep != 6.0)
+        gainStep = 3.0;
+    if (gainStart > gainEnd)
+        std::swap(gainStart, gainEnd);
+
     config.inputGainBucketsDb.clear();
-    for (const auto& token : tokens) {
-        float val = (float)token.trim().getDoubleValue();
-        config.inputGainBucketsDb.push_back(val);
-    }
+    for (double gain = gainStart; gain <= gainEnd + 1.0e-9; gain += gainStep)
+        config.inputGainBucketsDb.push_back(static_cast<float>(gain));
+
+    // Always include the requested end point, even when the range is not an exact
+    // multiple of the selected step.
+    if (config.inputGainBucketsDb.empty() ||
+        std::abs(static_cast<double>(config.inputGainBucketsDb.back()) - gainEnd) > 1.0e-6)
+        config.inputGainBucketsDb.push_back(static_cast<float>(gainEnd));
 
     // Analyzers
     config.analyzers.clear();
@@ -330,13 +366,29 @@ void MeasurementConfigComponent::loadFromConfig(const Config& config) {
     secondsEditor.setText(juce::String(config.seconds), juce::dontSendNotification);
     blockSizeEditor.setText(juce::String(config.blockSize), juce::dontSendNotification);
 
-    juce::String gainStr;
-    for (size_t i = 0; i < config.inputGainBucketsDb.size(); ++i) {
-        if (i > 0)
-            gainStr += ", ";
-        gainStr += juce::String(config.inputGainBucketsDb[i]);
+    // Reconstruct the range controls from an existing config. Legacy/custom lists
+    // still load safely; their first/last values become the visible range and the
+    // closest supported step (1/3/6 dB) is selected.
+    if (!config.inputGainBucketsDb.empty())
+    {
+        const double start = config.inputGainBucketsDb.front();
+        const double end = config.inputGainBucketsDb.back();
+        inputGainStartEditor.setText(juce::String(start), juce::dontSendNotification);
+        inputGainEndEditor.setText(juce::String(end), juce::dontSendNotification);
+
+        double observedStep = 3.0;
+        if (config.inputGainBucketsDb.size() >= 2)
+            observedStep = std::abs(static_cast<double>(config.inputGainBucketsDb[1]) -
+                                    static_cast<double>(config.inputGainBucketsDb[0]));
+
+        int selectedStep = 3;
+        if (std::abs(observedStep - 1.0) <= std::abs(observedStep - 3.0) &&
+            std::abs(observedStep - 1.0) <= std::abs(observedStep - 6.0))
+            selectedStep = 1;
+        else if (std::abs(observedStep - 6.0) < std::abs(observedStep - 3.0))
+            selectedStep = 6;
+        inputGainStepCombo.setSelectedId(selectedStep, juce::dontSendNotification);
     }
-    inputGainEditor.setText(gainStr, juce::dontSendNotification);
 
     auto hasAnalyzer = [&](const juce::String& name) {
         return std::find(config.analyzers.begin(), config.analyzers.end(), name) != config.analyzers.end();

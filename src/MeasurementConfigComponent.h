@@ -46,9 +46,14 @@ private:
     juce::Label blockSizeLabel;
     juce::TextEditor blockSizeEditor;
 
-    // Input gain buckets
+    // Input gain range
     juce::Label inputGainLabel;
-    juce::TextEditor inputGainEditor;
+    juce::Label inputGainStartLabel;
+    juce::TextEditor inputGainStartEditor;
+    juce::Label inputGainEndLabel;
+    juce::TextEditor inputGainEndEditor;
+    juce::Label inputGainStepLabel;
+    juce::ComboBox inputGainStepCombo;
 
     // Analyzers
     juce::GroupComponent analysisSuiteGroup;
