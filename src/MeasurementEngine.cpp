@@ -156,7 +156,8 @@ std::vector<std::unique_ptr<Analyzer>> createAnalyzers(const Config& config, con
 void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, int blockSize, int64_t totalSamples,
                         const std::vector<RunConfig>& runs, const std::vector<std::unique_ptr<Analyzer>>& analyzers,
                         const Config& config, const juce::File& outDir, std::function<void(int)> progressCallback,
-                        const std::vector<juce::AudioPluginInstance*>& serialPlugins) {
+                        const std::vector<juce::AudioPluginInstance*>& serialPlugins,
+                        std::function<bool()> shouldCancel) {
     auto paramMap = buildParameterMap(plugin, false); // Plugin 1 parameters
     std::vector<std::map<juce::String, juce::AudioProcessorParameter*>> serialParamMaps;
     serialParamMaps.reserve(serialPlugins.size());
@@ -176,6 +177,8 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
 
     int runCount = 0;
     for (const auto& run : runs) {
+        if (shouldCancel && shouldCancel())
+            break;
         runCount++;
         if (progressCallback) {
             progressCallback(run.runId);
@@ -260,6 +263,8 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
         // Process samples
         int64_t currentSample = 0;
         while (currentSample < totalSamples) {
+            if (shouldCancel && shouldCancel())
+                break;
             int numThisBlock = (int)std::min((int64_t)blockSize, totalSamples - currentSample);
             // Clear buffers
             inputBuffer.clear();

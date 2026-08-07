@@ -7,6 +7,7 @@
 #include "PluginLoader.h"
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <vector>
 
 class ParameterConfigComponent;
@@ -64,7 +65,13 @@ private:
         std::unique_ptr<juce::TextButton> loadButton;
         std::unique_ptr<juce::TextButton> openButton;
         std::unique_ptr<juce::TextButton> removeButton;
+        std::unique_ptr<juce::TextButton> parameterButton;
+        std::unique_ptr<juce::TextButton> targetButton;
         std::unique_ptr<juce::Label> infoLabel;
+        std::vector<juce::String> availableParameters;
+        std::vector<bool> selectedParameters;
+        std::map<juce::String, juce::AudioProcessorParameter*> parameterMap;
+        std::vector<ParameterBucketConfig> savedBuckets;
         std::unique_ptr<juce::AudioPluginInstance> pluginInstance;
         std::unique_ptr<juce::DocumentWindow> editorWindow;
     };
@@ -102,6 +109,7 @@ private:
     std::vector<bool> selectedParameters;
     std::vector<int> filteredParameterIndices;
     bool editingSerialParameters = false;
+    int editingParameterStage = 1;
     std::vector<juce::String> primaryAvailableParameters;
     std::vector<juce::String> serialAvailableParameters;
     std::vector<bool> primarySelectedParameters;
@@ -161,6 +169,8 @@ private:
 
     // Run button
     juce::TextButton runMeasurementButton;
+    juce::TextButton stopMeasurementButton;
+    std::atomic<bool> measurementCancelRequested { false };
 
     // Progress
     juce::Label progressLabel;

@@ -3103,11 +3103,17 @@ MainComponent::MainComponent()
         stage->loadButton = std::make_unique<juce::TextButton>("Load");
         stage->openButton = std::make_unique<juce::TextButton>("Open");
         stage->removeButton = std::make_unique<juce::TextButton>("Remove");
+        stage->parameterButton = std::make_unique<juce::TextButton>("Params");
+        stage->targetButton = std::make_unique<juce::TextButton>("P" + juce::String(stageNumber));
         stage->infoLabel = std::make_unique<juce::Label>(juce::String(), "No plugin loaded");
         stage->browseButton->addListener(this);
         stage->loadButton->addListener(this);
         stage->openButton->addListener(this);
         stage->removeButton->addListener(this);
+        stage->parameterButton->addListener(this);
+        stage->targetButton->addListener(this);
+        stage->parameterButton->setEnabled(false);
+        stage->targetButton->setEnabled(false);
         stage->openButton->setEnabled(false);
         addAndMakeVisible(*stage->label);
         addAndMakeVisible(*stage->pathEditor);
@@ -3115,6 +3121,8 @@ MainComponent::MainComponent()
         addAndMakeVisible(*stage->loadButton);
         addAndMakeVisible(*stage->openButton);
         addAndMakeVisible(*stage->removeButton);
+        addAndMakeVisible(*stage->parameterButton);
+        addAndMakeVisible(*stage->targetButton);
         addAndMakeVisible(*stage->infoLabel);
         additionalSerialStages.push_back(std::move(stage));
     }
@@ -3130,11 +3138,11 @@ MainComponent::MainComponent()
 
     parameterTargetLabel.setText("Parameter target", juce::dontSendNotification);
     addAndMakeVisible(parameterTargetLabel);
-    plugin1ParameterButton.setButtonText("Plugin 1");
+    plugin1ParameterButton.setButtonText("P1");
     plugin1ParameterButton.addListener(this);
     plugin1ParameterButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkcyan);
     addAndMakeVisible(plugin1ParameterButton);
-    plugin2ParameterButton.setButtonText("Plugin 2");
+    plugin2ParameterButton.setButtonText("P2");
     plugin2ParameterButton.addListener(this);
     addAndMakeVisible(plugin2ParameterButton);
 
@@ -3221,6 +3229,10 @@ MainComponent::MainComponent()
     runMeasurementButton.addListener(this);
     runMeasurementButton.setEnabled(false);
     addAndMakeVisible(runMeasurementButton);
+    stopMeasurementButton.setButtonText("Stop Measurement");
+    stopMeasurementButton.addListener(this);
+    stopMeasurementButton.setEnabled(false);
+    addAndMakeVisible(stopMeasurementButton);
 
     // Progress
     addAndMakeVisible(progressLabel);
@@ -3274,6 +3286,7 @@ void MainComponent::resized() {
         stage->browseButton->setBounds(stageRow.removeFromLeft(90)); stageRow.removeFromLeft(8);
         stage->loadButton->setBounds(stageRow.removeFromLeft(80)); stageRow.removeFromLeft(8);
         stage->openButton->setBounds(stageRow.removeFromLeft(70)); stageRow.removeFromLeft(8);
+        stage->parameterButton->setBounds(stageRow.removeFromLeft(76)); stageRow.removeFromLeft(8);
         stage->removeButton->setBounds(stageRow.removeFromLeft(80));
         stage->infoLabel->setBounds(pluginSection.removeFromTop(22));
     }
@@ -3293,9 +3306,16 @@ void MainComponent::resized() {
 
     auto targetRow = leftPanel.removeFromTop(28);
     parameterTargetLabel.setBounds(targetRow.removeFromLeft(110));
-    plugin1ParameterButton.setBounds(targetRow.removeFromLeft(86));
-    targetRow.removeFromLeft(6);
-    plugin2ParameterButton.setBounds(targetRow.removeFromLeft(86));
+    const int targetButtonWidth = 42;
+    const int targetGap = 4;
+    plugin1ParameterButton.setBounds(targetRow.removeFromLeft(targetButtonWidth));
+    targetRow.removeFromLeft(targetGap);
+    plugin2ParameterButton.setBounds(targetRow.removeFromLeft(targetButtonWidth));
+    for (auto& stage : additionalSerialStages)
+    {
+        targetRow.removeFromLeft(targetGap);
+        stage->targetButton->setBounds(targetRow.removeFromLeft(targetButtonWidth));
+    }
     leftPanel.removeFromTop(5);
     noParameterScanButton.setBounds(leftPanel.removeFromTop(30));
     leftPanel.removeFromTop(6);
@@ -3326,6 +3346,8 @@ void MainComponent::resized() {
     browseOutputButton.setBounds(outputRow.removeFromLeft(100));
     outputRow.removeFromLeft(10);
     runMeasurementButton.setBounds(outputRow.removeFromLeft(150));
+    outputRow.removeFromLeft(8);
+    stopMeasurementButton.setBounds(outputRow.removeFromLeft(150));
     outputRow.removeFromLeft(10);
     exportDataButton.setBounds(outputRow.removeFromLeft(135));
     outputRow.removeFromLeft(10);
@@ -3412,6 +3434,27 @@ void MainComponent::buttonClicked(juce::Button* button) {
                              stage.pluginInstance != nullptr ? stage.pluginInstance->getName() : "Serial Plugin");
             return;
         }
+        if (button == stage.parameterButton.get() || button == stage.targetButton.get())
+        {
+            if (stage.pluginInstance == nullptr) { showError("Load Plugin " + juce::String(stage.stageNumber) + " first."); return; }
+            saveCurrentParameterPanelState();
+            editingParameterStage = stage.stageNumber;
+            editingSerialParameters = false;
+            availableParameters = stage.availableParameters;
+            selectedParameters = stage.selectedParameters;
+            parameterMap = stage.parameterMap;
+            plugin1ParameterButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
+            plugin2ParameterButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
+            for (auto& targetStage : additionalSerialStages)
+                targetStage->targetButton->setColour(juce::TextButton::buttonColourId,
+                    targetStage.get() == &stage ? juce::Colours::darkcyan : juce::Colours::darkgrey);
+            parametersLabel.setText("Plugin " + juce::String(stage.stageNumber) + " parameters", juce::dontSendNotification);
+            filteredParameterIndices.clear(); for (int k=0;k<(int)availableParameters.size();++k) filteredParameterIndices.push_back(k);
+            parameterSearchEditor.clear(); parameterListBox.updateContent(); parameterListBox.repaint();
+            updateParameterList();
+            for (auto& comp : parameterConfigComponents) for (const auto& bucket : stage.savedBuckets) if (comp->getConfig().paramName == bucket.paramName) comp->setConfig(bucket);
+            return;
+        }
         if (button == stage.removeButton.get())
         {
             stage.editorWindow.reset();
@@ -3419,13 +3462,17 @@ void MainComponent::buttonClicked(juce::Button* button) {
             stage.pathEditor->clear();
             stage.infoLabel->setText("No plugin loaded", juce::dontSendNotification);
             stage.openButton->setEnabled(false);
+            stage.parameterButton->setEnabled(false);
+            stage.targetButton->setEnabled(false);
+            stage.availableParameters.clear(); stage.selectedParameters.clear(); stage.parameterMap.clear(); stage.savedBuckets.clear();
             // Removing a stage also clears every later stage so the serial chain remains contiguous.
             for (int j = i + 1; j < (int)additionalSerialStages.size(); ++j)
             {
                 auto& later = *additionalSerialStages[(size_t)j];
                 later.editorWindow.reset(); later.pluginInstance.reset(); later.pathEditor->clear();
                 later.infoLabel->setText("No plugin loaded", juce::dontSendNotification);
-                later.openButton->setEnabled(false);
+                later.openButton->setEnabled(false); later.parameterButton->setEnabled(false); later.targetButton->setEnabled(false);
+                later.availableParameters.clear(); later.selectedParameters.clear(); later.parameterMap.clear(); later.savedBuckets.clear();
             }
             refreshAdditionalSerialStageVisibility();
             resized();
@@ -3434,6 +3481,7 @@ void MainComponent::buttonClicked(juce::Button* button) {
     }
     if (button == &plugin1ParameterButton) {
         saveCurrentParameterPanelState();
+        editingParameterStage = 1;
         loadParameterPanelState(false);
         return;
     }
@@ -3443,6 +3491,7 @@ void MainComponent::buttonClicked(juce::Button* button) {
             return;
         }
         saveCurrentParameterPanelState();
+        editingParameterStage = 2;
         loadParameterPanelState(true);
         return;
     }
@@ -3518,6 +3567,10 @@ void MainComponent::buttonClicked(juce::Button* button) {
                               juce::dontSendNotification);
     } else if (button == &runMeasurementButton) {
         runMeasurement();
+    } else if (button == &stopMeasurementButton) {
+        measurementCancelRequested.store(true);
+        stopMeasurementButton.setEnabled(false);
+        progressLabel.setText("Stopping measurement...", juce::dontSendNotification);
     } else if (button == &copySummaryButton) {
         juce::SystemClipboard::copyTextToClipboard(buildSummaryText());
         progressLabel.setText("Summary copied to clipboard", juce::dontSendNotification);
@@ -3692,7 +3745,8 @@ void MainComponent::refreshAdditionalSerialStageVisibility()
         const bool visible = revealNext;
         stage->label->setVisible(visible); stage->pathEditor->setVisible(visible);
         stage->browseButton->setVisible(visible); stage->loadButton->setVisible(visible);
-        stage->openButton->setVisible(visible); stage->removeButton->setVisible(visible);
+        stage->openButton->setVisible(visible); stage->parameterButton->setVisible(visible); stage->removeButton->setVisible(visible);
+        stage->targetButton->setVisible(stage->pluginInstance != nullptr);
         stage->infoLabel->setVisible(visible);
         revealNext = visible && stage->pluginInstance != nullptr;
     }
@@ -3715,6 +3769,13 @@ void MainComponent::loadAdditionalSerialStage(int index)
     if (stage.pluginInstance == nullptr) { showError(error); return; }
     stage.infoLabel->setText("Loaded: " + stage.pluginInstance->getName(), juce::dontSendNotification);
     stage.openButton->setEnabled(stage.pluginInstance->hasEditor());
+    stage.parameterButton->setEnabled(true);
+    stage.targetButton->setEnabled(true);
+    stage.parameterMap = buildParameterMap(*stage.pluginInstance, true);
+    stage.availableParameters.clear();
+    stage.selectedParameters.clear();
+    for (const auto& [name, param] : stage.parameterMap) { stage.availableParameters.push_back(name); stage.selectedParameters.push_back(false); }
+    std::sort(stage.availableParameters.begin(), stage.availableParameters.end());
     refreshAdditionalSerialStageVisibility();
     resized();
 }
@@ -3770,26 +3831,32 @@ void MainComponent::saveCurrentParameterPanelState() {
     std::vector<ParameterBucketConfig> buckets;
     for (const auto& comp : parameterConfigComponents)
         buckets.push_back(comp->getConfig());
-    if (editingSerialParameters) {
-        serialAvailableParameters = availableParameters;
-        serialSelectedParameters = selectedParameters;
-        serialParameterMap = parameterMap;
-        serialSavedBuckets = std::move(buckets);
+    if (editingParameterStage >= 3) {
+        const int index = editingParameterStage - 3;
+        if (index >= 0 && index < (int)additionalSerialStages.size()) {
+            auto& stage = *additionalSerialStages[(size_t)index];
+            stage.availableParameters = availableParameters; stage.selectedParameters = selectedParameters;
+            stage.parameterMap = parameterMap; stage.savedBuckets = std::move(buckets);
+        }
+    } else if (editingParameterStage == 2) {
+        serialAvailableParameters = availableParameters; serialSelectedParameters = selectedParameters;
+        serialParameterMap = parameterMap; serialSavedBuckets = std::move(buckets);
     } else {
-        primaryAvailableParameters = availableParameters;
-        primarySelectedParameters = selectedParameters;
-        primaryParameterMap = parameterMap;
-        primarySavedBuckets = std::move(buckets);
+        primaryAvailableParameters = availableParameters; primarySelectedParameters = selectedParameters;
+        primaryParameterMap = parameterMap; primarySavedBuckets = std::move(buckets);
     }
 }
 
 void MainComponent::loadParameterPanelState(bool serial) {
     editingSerialParameters = serial;
+    editingParameterStage = serial ? 2 : 1;
     availableParameters = serial ? serialAvailableParameters : primaryAvailableParameters;
     selectedParameters = serial ? serialSelectedParameters : primarySelectedParameters;
     parameterMap = serial ? serialParameterMap : primaryParameterMap;
     plugin1ParameterButton.setColour(juce::TextButton::buttonColourId, serial ? juce::Colours::darkgrey : juce::Colours::darkcyan);
     plugin2ParameterButton.setColour(juce::TextButton::buttonColourId, serial ? juce::Colours::darkcyan : juce::Colours::darkgrey);
+    for (auto& stage : additionalSerialStages)
+        stage->targetButton->setColour(juce::TextButton::buttonColourId, juce::Colours::darkgrey);
     parametersLabel.setText(serial ? "Plugin 2 parameters" : "Plugin 1 parameters", juce::dontSendNotification);
     filteredParameterIndices.clear();
     for (int i = 0; i < static_cast<int>(availableParameters.size()); ++i)
@@ -3841,6 +3908,7 @@ void MainComponent::runMeasurement() {
     int selectedCount = 0;
     for (bool selected : primarySelectedParameters) if (selected) selectedCount++;
     for (bool selected : serialSelectedParameters) if (selected) selectedCount++;
+    for (const auto& stage : additionalSerialStages) for (bool selected : stage->selectedParameters) if (selected) selectedCount++;
 
     if (selectedCount == 0 && !noParameterScanButton.getToggleState()) {
         showError("Select a parameter, or enable 'No parameter scan' to test the plugin at its current settings.");
@@ -3876,7 +3944,9 @@ void MainComponent::runMeasurement() {
     }
 
     // Run measurement in background thread
+    measurementCancelRequested.store(false);
     runMeasurementButton.setEnabled(false);
+    stopMeasurementButton.setEnabled(true);
     exportDataButton.setEnabled(false);
     exportEvidenceButton.setEnabled(false);
     progressLabel.setText("Running measurement...", juce::dontSendNotification);
@@ -4127,8 +4197,9 @@ void MainComponent::runMeasurement() {
                             progress = overallProgress;
                             progressBar.repaint();
                         });
-                    }, passSerialPlugins);
+                    }, passSerialPlugins, [this]() { return measurementCancelRequested.load(); });
 
+                if (measurementCancelRequested.load()) break;
                 completedPassRuns += (int)runs.size();
 
                 for (auto& analyzer : passAnalyzers)
@@ -4273,6 +4344,15 @@ void MainComponent::runMeasurement() {
                 }
             }
 
+            if (measurementCancelRequested.load()) {
+                juce::MessageManager::callAsync([this]() {
+                    progressLabel.setText("Measurement stopped", juce::dontSendNotification);
+                    runMeasurementButton.setEnabled(true); stopMeasurementButton.setEnabled(false);
+                    progress = 0.0; progressBar.repaint();
+                });
+                return;
+            }
+
             LevelSummary levelSummary {
                 "Run RMS/Peak to see level behaviour",
                 "Run RMS/Peak to see transient behaviour",
@@ -4411,6 +4491,7 @@ void MainComponent::runMeasurement() {
                 progress = 1.0;
                 progressBar.repaint();
                 runMeasurementButton.setEnabled(true);
+                stopMeasurementButton.setEnabled(false);
                 copySummaryButton.setEnabled(true);
                 exportDataButton.setEnabled(true);
                 exportEvidenceButton.setEnabled(true);
@@ -4419,13 +4500,13 @@ void MainComponent::runMeasurement() {
             std::cerr << "[Measurement] Exception: " << e.what() << std::endl;
             juce::MessageManager::callAsync([this, e]() {
                 showError("Error: " + juce::String(e.what()));
-                runMeasurementButton.setEnabled(true);
+                runMeasurementButton.setEnabled(true); stopMeasurementButton.setEnabled(false);
             });
         } catch (...) {
             std::cerr << "[Measurement] Unknown exception occurred" << std::endl;
             juce::MessageManager::callAsync([this]() {
                 showError("Unknown error occurred during measurement");
-                runMeasurementButton.setEnabled(true);
+                runMeasurementButton.setEnabled(true); stopMeasurementButton.setEnabled(false);
             });
         }
     }).detach();
@@ -4451,6 +4532,10 @@ Config MainComponent::buildConfigFromUI() {
     };
     appendBuckets(primarySavedBuckets, primaryParameterMap, "P1::");
     appendBuckets(serialSavedBuckets, serialParameterMap, "P2::");
+    for (const auto& stage : additionalSerialStages) {
+        if (stage->pluginInstance == nullptr) break;
+        appendBuckets(stage->savedBuckets, stage->parameterMap, "P" + juce::String(stage->stageNumber) + "::");
+    }
     return config;
 }
 
