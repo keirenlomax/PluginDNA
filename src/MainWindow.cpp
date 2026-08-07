@@ -41,7 +41,7 @@ void MainWindow::resized() {
         return;
 
     const int availableWidth = juce::jmax(900, viewport->getMaximumVisibleWidth());
-    const int contentHeight = 1940;
+    const int contentHeight = 2420; // V22.1: include DNA Map below summary
 
     mainComponent->setSize(availableWidth, contentHeight);
 }

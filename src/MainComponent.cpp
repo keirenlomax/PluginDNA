@@ -3294,6 +3294,8 @@ MainComponent::MainComponent()
     // Human-readable result summary
     resultsSummaryGroup.setText("Signal Summary");
     addAndMakeVisible(resultsSummaryGroup);
+    // V22.2 visual behaviour map
+    addAndMakeVisible(spectralResponse);
 
     copySummaryButton.setButtonText("Copy Summary");
     copySummaryButton.addListener(this);
@@ -3330,7 +3332,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(progressBar);
     progressBar.setPercentageDisplay(false);
 
-    setSize(1240, 1900);
+    setSize(1240, 2380);
 }
 
 MainComponent::~MainComponent() {}
@@ -3460,6 +3462,10 @@ void MainComponent::resized() {
                                 + summaryLabelCount * summaryLabelHeight
                                 + summaryGapCount * summaryGap;
 
+    // V22.2: visual first, then detailed text summary.
+    spectralResponse.setBounds(bounds.removeFromTop(520));
+    bounds.removeFromTop(10);
+
     auto summaryBounds = bounds.removeFromTop(summaryHeight);
     resultsSummaryGroup.setBounds(summaryBounds);
     auto summaryHeader = summaryBounds.removeFromTop(44).reduced(12, 8);
@@ -3498,6 +3504,7 @@ void MainComponent::resized() {
     temporalResponseLabel.setBounds(summaryBounds.removeFromTop(summaryLabelHeight));
     temporalAttackLabel.setBounds(summaryBounds.removeFromTop(summaryLabelHeight));
     temporalAfterLabel.setBounds(summaryBounds.removeFromTop(summaryLabelHeight));
+
 }
 
 void MainComponent::buttonClicked(juce::Button* button) {
@@ -4639,19 +4646,99 @@ void MainComponent::runMeasurement() {
             if(std::isfinite(uiSelfNoise)&&uiSelfNoise>-100)warnings.add("adds measurable idle noise");
             if(!warnings.isEmpty())uiWatch=warnings.joinIntoString(" · ").toUpperCase();
 
-            // Relative drive-map summary for first character/heavy regions.
+            // Relative drive-map summary + Phase 1 spectral visual.
             juce::String uiCharacter="not detected",uiHeavy="not detected";
+            juce::String uiSpectralParamName;
+            double uiSpectralParamValue=0.0;
+            std::vector<SpectralResponseComponent::Trace> uiSpectralTraces;
+
             if(!config.parameterBuckets.empty()&&uiThd&&uiRms)
             {
                 const int tr=findColumn(*uiThd,"runId"),tc=findColumn(*uiThd,"thd");
                 const int rr=findColumn(*uiRms,"runId"),ri=findColumn(*uiRms,"rmsInL"),ro=findColumn(*uiRms,"rmsOutL"),rp=findColumn(*uiRms,"peakInL"),rq=findColumn(*uiRms,"peakOutL");
-                std::map<int,double> td,cr;
-                if(tr>=0&&tc>=0)for(const auto& row:uiThd->rows)if((std::size_t)std::max(tr,tc)<row.size())td[(int)std::llround(row[(std::size_t)tr])]=std::max(td[(int)std::llround(row[(std::size_t)tr])],row[(std::size_t)tc]);
-                if(rr>=0&&ri>=0&&ro>=0&&rp>=0&&rq>=0)for(const auto& row:uiRms->rows)if((std::size_t)std::max({rr,ri,ro,rp,rq})<row.size()){const int id=(int)std::llround(row[(std::size_t)rr]);cr[id]=dbAmp(row[(std::size_t)rq]/std::max(std::abs(row[(std::size_t)ro]),1e-15))-dbAmp(row[(std::size_t)rp]/std::max(std::abs(row[(std::size_t)ri]),1e-15));}
-                int run=0;std::function<void(int,juce::StringArray)> walk;walk=[&](int idx,juce::StringArray setting){
-                    if(idx>=(int)config.parameterBuckets.size()){for(std::size_t gi=0;gi<config.inputGainBucketsDb.size();++gi,++run){const int base=(int)gi;double score=0;auto a=td.find(run),b=td.find(base);if(a!=td.end()&&b!=td.end()&&a->second>0&&b->second>0){double d=dbAmp(a->second)-dbAmp(b->second);if(d>3)score+=1;if(d>9)score+=1;}auto ca=cr.find(run),cb=cr.find(base);if(ca!=cr.end()&&cb!=cr.end()){double d=std::abs(ca->second-cb->second);if(d>0.25)score+=1;if(d>1.25)score+=1;}juce::String here=setting.joinIntoString(", ")+" @ "+juce::String(config.inputGainBucketsDb[gi],1)+" dBFS";if(score>=1.5&&uiCharacter=="not detected")uiCharacter=here;if(score>=4.0&&uiHeavy=="not detected")uiHeavy=here;}return;}
-                    const auto& b=config.parameterBuckets[(std::size_t)idx];const auto vals=generatedBucketValues(b);for(const auto& v:vals){auto n=setting;n.add(b.paramName.fromFirstOccurrenceOf("::",false,false)+" "+juce::String((double)v,2));walk(idx+1,n);}};
+                const int ar=uiAlias?findColumn(*uiAlias,"runId"):-1, ac=uiAlias?findColumn(*uiAlias,"aliasPowerDb"):-1;
+                const int irun=uiInteraction?findColumn(*uiInteraction,"runId"):-1, imag=uiInteraction?findColumn(*uiInteraction,"magDbRelativeToInput"):-1;
+
+                std::map<int,double> td,cr,al,im;
+                if(tr>=0&&tc>=0)for(const auto& row:uiThd->rows)if((std::size_t)std::max(tr,tc)<row.size())
+                {int id=(int)std::llround(row[(std::size_t)tr]);auto it=td.find(id);td[id]=it==td.end()?row[(std::size_t)tc]:std::max(it->second,row[(std::size_t)tc]);}
+                if(rr>=0&&ri>=0&&ro>=0&&rp>=0&&rq>=0)for(const auto& row:uiRms->rows)if((std::size_t)std::max({rr,ri,ro,rp,rq})<row.size())
+                {const int id=(int)std::llround(row[(std::size_t)rr]);cr[id]=dbAmp(row[(std::size_t)rq]/std::max(std::abs(row[(std::size_t)ro]),1e-15))-dbAmp(row[(std::size_t)rp]/std::max(std::abs(row[(std::size_t)ri]),1e-15));}
+                if(uiAlias&&ar>=0&&ac>=0)for(const auto& row:uiAlias->rows)if((std::size_t)std::max(ar,ac)<row.size())
+                {int id=(int)std::llround(row[(std::size_t)ar]);auto it=al.find(id);al[id]=it==al.end()?row[(std::size_t)ac]:std::max(it->second,row[(std::size_t)ac]);}
+                if(uiInteraction&&irun>=0&&imag>=0)for(const auto& row:uiInteraction->rows)if((std::size_t)std::max(irun,imag)<row.size())
+                {int id=(int)std::llround(row[(std::size_t)irun]);auto it=im.find(id);im[id]=it==im.end()?row[(std::size_t)imag]:std::max(it->second,row[(std::size_t)imag]);}
+
+                const auto rel=[&](const std::map<int,double>& m,int id,int base){auto a=m.find(id),b=m.find(base);return(a!=m.end()&&b!=m.end()&&std::isfinite(a->second)&&std::isfinite(b->second))?a->second-b->second:0.0;};
+                int run=0;std::function<void(int,juce::StringArray)> walk;
+                walk=[&](int idx,juce::StringArray setting)
+                {
+                    if(idx>=(int)config.parameterBuckets.size())
+                    {
+                        for(std::size_t gi=0;gi<config.inputGainBucketsDb.size();++gi,++run)
+                        {
+                            const int base=(int)gi;double score=0;
+                            auto a=td.find(run),b=td.find(base);if(a!=td.end()&&b!=td.end()&&a->second>0&&b->second>0){double d=dbAmp(a->second)-dbAmp(b->second);if(d>3)score+=1;if(d>9)score+=1;}
+                            double d=rel(al,run,base);if(d>6)score+=0.75;if(d>18)score+=0.75;
+                            d=rel(cr,run,base);if(std::abs(d)>0.25)score+=1;if(std::abs(d)>1.25)score+=1;
+                            d=rel(im,run,base);if(d>6)score+=0.75;if(d>18)score+=0.75;
+                            auto aa=al.find(run);if(aa!=al.end()&&aa->second>-45)score+=0.5;auto ii=im.find(run);if(ii!=im.end()&&ii->second>-30)score+=0.5;
+                            const juce::String region=score<1.5?"light":score<4.0?"character":"heavy";
+                            const juce::String here=setting.joinIntoString(", ")+" @ "+juce::String(config.inputGainBucketsDb[gi],1)+" dBFS";
+                            if(region=="character"&&uiCharacter=="not detected")uiCharacter=here;
+                            if(region=="heavy"&&uiHeavy=="not detected")uiHeavy=here;
+                        }
+                        return;
+                    }
+                    const auto& b=config.parameterBuckets[(std::size_t)idx];const auto vals=generatedBucketValues(b);
+                    for(const auto& v:vals){auto n=setting;n.add(b.paramName.fromFirstOccurrenceOf("::",false,false)+" "+juce::String((double)v,2));walk(idx+1,n);}
+                };
                 walk(0,{});
+
+                // Spectral visual: use the highest tested parameter value so the
+                // overlay clearly shows how the processor changes as input rises.
+                if(config.parameterBuckets.size()==1 && uiSweep)
+                {
+                    const auto& bucket=config.parameterBuckets[0];
+                    const auto values=generatedBucketValues(bucket);
+                    if(!values.isEmpty())
+                    {
+                        uiSpectralParamName=bucket.paramName;
+                        uiSpectralParamValue=(double)values.getLast();
+                        const int fc=findColumn(*uiSweep,"freqHz");
+                        const int mc=findColumn(*uiSweep,"magDb");
+                        const int pc=findColumn(*uiSweep,bucket.paramName.toStdString());
+                        const int gc=findColumn(*uiSweep,"inputGainDb");
+                        if(fc>=0&&mc>=0&&pc>=0&&gc>=0)
+                        {
+                            for(double gain:config.inputGainBucketsDb)
+                            {
+                                SpectralResponseComponent::Trace trace;
+                                trace.inputGainDb=gain;
+                                trace.parameterValue=uiSpectralParamValue;
+                                trace.label=juce::String(gain,0)+" dB";
+                                for(const auto& row:uiSweep->rows)
+                                {
+                                    if((std::size_t)std::max({fc,mc,pc,gc})>=row.size())continue;
+                                    if(std::abs(row[(std::size_t)pc]-uiSpectralParamValue)>1.0e-5)continue;
+                                    if(std::abs(row[(std::size_t)gc]-gain)>0.01)continue;
+                                    trace.frequencyHz.push_back(row[(std::size_t)fc]);
+                                    trace.magnitudeDb.push_back(row[(std::size_t)mc]);
+                                }
+                                if(trace.frequencyHz.size()>1)
+                                {
+                                    std::vector<std::size_t> idx(trace.frequencyHz.size());
+                                    std::iota(idx.begin(),idx.end(),0);
+                                    std::sort(idx.begin(),idx.end(),[&](std::size_t a,std::size_t b){return trace.frequencyHz[a]<trace.frequencyHz[b];});
+                                    SpectralResponseComponent::Trace sorted=trace;
+                                    sorted.frequencyHz.clear();sorted.magnitudeDb.clear();
+                                    for(auto i:idx){sorted.frequencyHz.push_back(trace.frequencyHz[i]);sorted.magnitudeDb.push_back(trace.magnitudeDb[i]);}
+                                    uiSpectralTraces.push_back(std::move(sorted));
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             const auto compactSummary = juce::String("PluginDNA Summary\\n\\n")
@@ -4673,7 +4760,8 @@ void MainComponent::runMeasurement() {
             }
 
             juce::MessageManager::callAsync([this, identitySummary, uiHarmonic, uiTone, uiDynamics, uiClean, uiStereoText, uiMemory, uiWatch, uiCharacter, uiHeavy,
-                                                uiWorstAlias, uiWorstImd, uiSelfNoise, uiAttack, uiRelease, uiTP, uiTPOvershoot]() {
+                                                uiWorstAlias, uiWorstImd, uiSelfNoise, uiAttack, uiRelease, uiTP, uiTPOvershoot,
+                                                uiSpectralParamName, uiSpectralParamValue, uiSpectralTraces]() {
                 progressLabel.setText("Measurement complete", juce::dontSendNotification);
                 identityRoleLabel.setText(identitySummary.role, juce::dontSendNotification);
                 identityWhyLabel.setText("CHARACTER  " + uiHarmonic + " · " + uiTone, juce::dontSendNotification);
@@ -4688,6 +4776,10 @@ void MainComponent::runMeasurement() {
                 toneMidLabel.setText(std::isfinite(uiSelfNoise) ? "SELF-NOISE  " + juce::String(uiSelfNoise,1) + " dBFS" : juce::String(), juce::dontSendNotification);
                 toneTrebleLabel.setText((std::isfinite(uiAttack)||std::isfinite(uiRelease)) ? "ENVELOPE  attack " + juce::String(uiAttack,3) + " ms · release " + juce::String(uiRelease,3) + " ms" : juce::String(), juce::dontSendNotification);
                 toneLargestLabel.setText(std::isfinite(uiTP) ? "TRUE PEAK  " + juce::String(uiTP,2) + " dBTP · overshoot " + juce::String(uiTPOvershoot,2) + " dB" : juce::String(), juce::dontSendNotification);
+                if(!uiSpectralTraces.empty())
+                    spectralResponse.setData(uiSpectralParamName, uiSpectralParamValue, uiSpectralTraces);
+                else
+                    spectralResponse.clear();
                 behaviourSummaryLabel.setText({}, juce::dontSendNotification);
                 behaviourChangesLabel.setText({}, juce::dontSendNotification);
                 operatingRangeLabel.setText({}, juce::dontSendNotification);
@@ -4842,7 +4934,7 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
     std::thread([this, outDir, config, summary, datasets = std::move(datasets), fullPackageFiles, pluginPath, pluginInfo, serialPluginPath, serialPluginInfo, additionalPluginPaths, additionalPluginInfos, exportingFullPackage]() mutable {
         auto* root = new juce::DynamicObject();
         root->setProperty("schema", "PluginDNA Evidence Pack");
-        root->setProperty("schemaVersion", 28);
+        root->setProperty("schemaVersion", 30);
         root->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
 
         const juce::File pluginFile(pluginPath);
@@ -6406,7 +6498,7 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
         {
             auto* manifest = new juce::DynamicObject();
             manifest->setProperty("schema", "PluginDNA Full Evidence Manifest");
-            manifest->setProperty("schemaVersion", 28);
+            manifest->setProperty("schemaVersion", 30);
             manifest->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
             manifest->setProperty("evidenceFile", filename);
             manifest->setProperty("plugin", juce::File(pluginPath).getFileNameWithoutExtension());
@@ -6568,6 +6660,7 @@ void MainComponent::exportMeasurementData()
 
 void MainComponent::clearResultsSummary()
 {
+    spectralResponse.clear();
     copySummaryButton.setEnabled(false);
     exportDataButton.setEnabled(false);
     exportEvidenceButton.setEnabled(false);
