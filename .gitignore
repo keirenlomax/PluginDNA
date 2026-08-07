@@ -1,1 +1,14 @@
+# Build output
+build/
+
+# macOS
 .DS_Store
+
+# Local backups
+src_backup_*/
+
+# Temporary files
+*.zip
+INSTALL_*.txt
+build_error.txt
+apply_project_changes.sh

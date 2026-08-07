@@ -3,11 +3,11 @@
 #include "Config.h"
 #include "JuceHeader.h"
 #include "MeasurementEngine.h"
+#include "MeasurementResult.h"
 #include "PluginLoader.h"
 #include <memory>
 #include <mutex>
 #include <vector>
-#include "MeasurementResult.h"
 
 class ParameterConfigComponent;
 class MeasurementConfigComponent;
@@ -32,6 +32,11 @@ public:
 
 private:
     void loadPlugin();
+    void loadSerialPlugin();
+    void scanSerialPluginParameters();
+    void saveCurrentParameterPanelState();
+    void loadParameterPanelState(bool serial);
+    void openPluginEditor(juce::AudioPluginInstance* plugin, std::unique_ptr<juce::DocumentWindow>& window, const juce::String& title);
     void scanPluginParameters();
     void updateParameterList();
     void runMeasurement();
@@ -40,6 +45,7 @@ private:
     void clearResultsSummary();
     juce::String buildSummaryText() const;
     void exportMeasurementData();
+    void exportEvidencePack(const juce::File& overrideOutputDirectory = {});
 
     struct PendingExportDataset
     {
@@ -48,21 +54,47 @@ private:
     };
 
     // Plugin selection
+    juce::Label buildVersionLabel;
     juce::Label pluginPathLabel;
     juce::TextEditor pluginPathEditor;
     juce::TextButton browseButton;
     juce::TextButton loadPluginButton;
+    juce::TextButton openPluginButton;
+
+    // Optional second processor for serial stage analysis
+    juce::Label serialPluginLabel;
+    juce::TextEditor serialPluginPathEditor;
+    juce::TextButton serialBrowseButton;
+    juce::TextButton serialLoadButton;
+    juce::TextButton serialOpenButton;
+    juce::Label serialPluginInfoLabel;
 
     // Plugin info
     juce::Label pluginInfoLabel;
 
     // Parameter selection and configuration
+    juce::GroupComponent parameterScanGroup;
+    juce::TextButton plugin1ParameterButton;
+    juce::TextButton plugin2ParameterButton;
+    juce::Label parameterTargetLabel;
     juce::Label parametersLabel;
+    juce::TextEditor parameterSearchEditor;
     juce::ListBox parameterListBox;
     std::vector<juce::String> availableParameters;
     std::vector<bool> selectedParameters;
+    std::vector<int> filteredParameterIndices;
+    bool editingSerialParameters = false;
+    std::vector<juce::String> primaryAvailableParameters;
+    std::vector<juce::String> serialAvailableParameters;
+    std::vector<bool> primarySelectedParameters;
+    std::vector<bool> serialSelectedParameters;
+    std::map<juce::String, juce::AudioProcessorParameter*> primaryParameterMap;
+    std::map<juce::String, juce::AudioProcessorParameter*> serialParameterMap;
+    std::vector<ParameterBucketConfig> primarySavedBuckets;
+    std::vector<ParameterBucketConfig> serialSavedBuckets;
     juce::TextButton selectAllButton;
     juce::TextButton deselectAllButton;
+    juce::ToggleButton noParameterScanButton;
 
     // Parameter configuration panel
     juce::Viewport parameterConfigViewport;
@@ -77,6 +109,7 @@ private:
     juce::TextEditor outputPathEditor;
     juce::TextButton browseOutputButton;
     juce::TextButton exportDataButton;
+    juce::TextButton exportEvidenceButton;
 
     // Human-readable measurement summary
     juce::GroupComponent resultsSummaryGroup;
@@ -118,9 +151,15 @@ private:
 
     // Plugin instance
     std::unique_ptr<juce::AudioPluginInstance> pluginInstance;
+    std::unique_ptr<juce::AudioPluginInstance> serialPluginInstance;
+    std::unique_ptr<juce::DocumentWindow> pluginEditorWindow;
+    std::unique_ptr<juce::DocumentWindow> serialPluginEditorWindow;
     std::map<juce::String, juce::AudioProcessorParameter*> parameterMap;
 
     std::vector<PendingExportDataset> pendingExportDatasets;
+    Config pendingEvidenceConfig;
+    juce::String pendingEvidenceSummary;
+    bool hasPendingEvidencePack = false;
     std::mutex pendingExportMutex;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)

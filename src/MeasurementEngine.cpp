@@ -1,6 +1,13 @@
 #include "MeasurementEngine.h"
 #include "BucketSpec.h"
 #include "LinearResponseAnalyzer.h"
+#include "InteractionAnalyzer.h"
+#include "TimingAnalyzer.h"
+#include "ResidualAnalyzer.h"
+#include "BoundaryAnalyzer.h"
+#include "StereoAnalyzer.h"
+#include "SummingAnalyzer.h"
+#include "AliasAnalyzer.h"
 #include "PluginLoader.h"
 #include "RawCsvAnalyzer.h"
 #include "RmsPeakAnalyzer.h"
@@ -27,6 +34,21 @@ std::vector<RunConfig> buildRunGrid(const Config& config, const std::vector<juce
         spec.values = bucketConfig.values;
 
         auto values = spec.generateValues();
+        if (bucketConfig.includePluginDefault && !bucketConfig.strategy.equalsIgnoreCase("Enumerated"))
+        {
+            const auto defaultValue = juce::jlimit(0.0f, 1.0f, bucketConfig.pluginDefaultValue);
+            const auto alreadyIncluded = std::any_of(values.begin(), values.end(), [defaultValue](float value)
+            {
+                return std::abs(value - defaultValue) < 1.0e-5f;
+            });
+            if (!alreadyIncluded)
+                values.push_back(defaultValue);
+            std::sort(values.begin(), values.end());
+            values.erase(std::unique(values.begin(), values.end(), [](float a, float b)
+            {
+                return std::abs(a - b) < 1.0e-5f;
+            }), values.end());
+        }
         paramValueLists.push_back({bucketConfig.paramName, values});
     }
 
@@ -65,6 +87,42 @@ std::vector<std::unique_ptr<Analyzer>> createAnalyzers(const Config& config, con
                                                        const std::vector<juce::String>& paramNames) {
     std::vector<std::unique_ptr<Analyzer>> analyzers;
 
+    if (config.signalType.equalsIgnoreCase("interaction"))
+    {
+        analyzers.push_back(createInteractionAnalyzer(config.sampleRate, config.seconds, paramNames));
+        return analyzers;
+    }
+    if (config.signalType.equalsIgnoreCase("timing"))
+    {
+        analyzers.push_back(createTimingAnalyzer(config.sampleRate, 8192, paramNames));
+        return analyzers;
+    }
+    if (config.signalType.equalsIgnoreCase("residual"))
+    {
+        analyzers.push_back(createResidualAnalyzer(config.sampleRate, paramNames));
+        return analyzers;
+    }
+    if (config.signalType.equalsIgnoreCase("boundary"))
+    {
+        analyzers.push_back(createBoundaryAnalyzer(config.sampleRate, config.seconds, paramNames));
+        return analyzers;
+    }
+    if (config.signalType.equalsIgnoreCase("stereo"))
+    {
+        analyzers.push_back(createStereoAnalyzer(static_cast<int64_t>(config.seconds * config.sampleRate / 4.0), paramNames));
+        return analyzers;
+    }
+    if (config.signalType.equalsIgnoreCase("summing"))
+    {
+        analyzers.push_back(createSummingAnalyzer(static_cast<int64_t>(config.seconds * config.sampleRate / 3.0), paramNames));
+        return analyzers;
+    }
+    if (config.signalType.equalsIgnoreCase("alias"))
+    {
+        analyzers.push_back(createAliasAnalyzer(config.sampleRate, config.seconds, paramNames));
+        return analyzers;
+    }
+
     for (const auto& analyzerName : config.analyzers) {
         if (analyzerName.equalsIgnoreCase("RawCsv")) {
             analyzers.push_back(createRawCsvAnalyzer(outDir, config.signalType));
@@ -74,7 +132,9 @@ std::vector<std::unique_ptr<Analyzer>> createAnalyzers(const Config& config, con
             analyzers.push_back(createTransferCurveAnalyzer(outDir, 512, paramNames, config.signalType));
         } else if (analyzerName.equalsIgnoreCase("LinearResponse")) {
             if (config.signalType.equalsIgnoreCase("noise") || config.signalType.equalsIgnoreCase("sweep")) {
-                analyzers.push_back(createLinearResponseAnalyzer(outDir, 4096, paramNames, config.signalType));
+                analyzers.push_back(createLinearResponseAnalyzer(outDir, 4096, paramNames, config.signalType,
+                                                                config.sweepStartHz, config.sweepEndHz,
+                                                                config.seconds));
             } else {
                 std::cerr << "Warning: LinearResponse analyzer requires noise or sweep signal type" << std::endl;
             }
@@ -95,8 +155,12 @@ std::vector<std::unique_ptr<Analyzer>> createAnalyzers(const Config& config, con
 
 void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, int blockSize, int64_t totalSamples,
                         const std::vector<RunConfig>& runs, const std::vector<std::unique_ptr<Analyzer>>& analyzers,
-                        const Config& config, const juce::File& outDir, std::function<void(int)> progressCallback) {
-    auto paramMap = buildParameterMap(plugin, false); // Use all parameters for measurement
+                        const Config& config, const juce::File& outDir, std::function<void(int)> progressCallback,
+                        juce::AudioPluginInstance* serialPlugin) {
+    auto paramMap = buildParameterMap(plugin, false); // Plugin 1 parameters
+    std::map<juce::String, juce::AudioProcessorParameter*> serialParamMap;
+    if (serialPlugin != nullptr)
+        serialParamMap = buildParameterMap(*serialPlugin, false);
 
     // Build parameter name list in order
     std::vector<juce::String> paramNames;
@@ -116,7 +180,14 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
         }
         // Set plugin parameters
         for (const auto& [paramName, value] : run.paramValues) {
-            setParameterValue(plugin, paramMap, paramName, value);
+            if (paramName.startsWith("P2::")) {
+                if (serialPlugin != nullptr)
+                    setParameterValue(*serialPlugin, serialParamMap, paramName.substring(4), value);
+            } else if (paramName.startsWith("P1::")) {
+                setParameterValue(plugin, paramMap, paramName.substring(4), value);
+            } else {
+                setParameterValue(plugin, paramMap, paramName, value);
+            }
         }
 
         // Convert input gain from dB to linear amplitude
@@ -126,6 +197,12 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
         std::unique_ptr<SineGenerator> sineGen;
         std::unique_ptr<NoiseGenerator> noiseGen;
         std::unique_ptr<SweepGenerator> sweepGen;
+        std::unique_ptr<InteractionGenerator> interactionGen;
+        std::unique_ptr<DeltaGenerator> deltaGen;
+        std::unique_ptr<BoundaryGenerator> boundaryGen;
+        std::unique_ptr<StereoTestGenerator> stereoGen;
+        std::unique_ptr<SummingTestGenerator> summingGen;
+        std::unique_ptr<AliasStressGenerator> aliasGen;
 
         if (config.signalType.equalsIgnoreCase("sine")) {
             sineGen = std::make_unique<SineGenerator>();
@@ -143,6 +220,35 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
             sweepGen->duration = config.seconds;
             sweepGen->amplitude = inputGainLinear;
             sweepGen->reset();
+        } else if (config.signalType.equalsIgnoreCase("interaction")) {
+            interactionGen = std::make_unique<InteractionGenerator>();
+            interactionGen->sampleRate = sampleRate;
+            interactionGen->duration = config.seconds;
+            interactionGen->amplitude = inputGainLinear;
+            interactionGen->reset();
+        } else if (config.signalType.equalsIgnoreCase("timing")) {
+            deltaGen = std::make_unique<DeltaGenerator>();
+            deltaGen->impulseSample = 8192;
+            deltaGen->amplitude = inputGainLinear;
+            deltaGen->reset();
+        } else if (config.signalType.equalsIgnoreCase("residual")) {
+            noiseGen = std::make_unique<NoiseGenerator>();
+            noiseGen->amplitude = inputGainLinear;
+        } else if (config.signalType.equalsIgnoreCase("boundary")) {
+            boundaryGen = std::make_unique<BoundaryGenerator>();
+            boundaryGen->sampleRate = sampleRate;
+            boundaryGen->duration = config.seconds;
+            boundaryGen->amplitude = inputGainLinear;
+            boundaryGen->reset();
+        } else if (config.signalType.equalsIgnoreCase("stereo")) {
+            stereoGen = std::make_unique<StereoTestGenerator>();
+            stereoGen->sampleRate = sampleRate; stereoGen->duration = config.seconds; stereoGen->amplitude = inputGainLinear; stereoGen->reset();
+        } else if (config.signalType.equalsIgnoreCase("summing")) {
+            summingGen = std::make_unique<SummingTestGenerator>();
+            summingGen->sampleRate = sampleRate; summingGen->duration = config.seconds; summingGen->amplitude = inputGainLinear; summingGen->reset();
+        } else if (config.signalType.equalsIgnoreCase("alias")) {
+            aliasGen = std::make_unique<AliasStressGenerator>();
+            aliasGen->sampleRate = sampleRate; aliasGen->duration = config.seconds; aliasGen->amplitude = inputGainLinear; aliasGen->reset();
         }
 
         // Process samples
@@ -160,6 +266,18 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
                 noiseGen->fillBlock(inputBuffer, numThisBlock);
             } else if (sweepGen) {
                 sweepGen->fillBlock(inputBuffer, numThisBlock);
+            } else if (interactionGen) {
+                interactionGen->fillBlock(inputBuffer, numThisBlock);
+            } else if (deltaGen) {
+                deltaGen->fillBlock(inputBuffer, numThisBlock);
+            } else if (boundaryGen) {
+                boundaryGen->fillBlock(inputBuffer, numThisBlock);
+            } else if (stereoGen) {
+                stereoGen->fillBlock(inputBuffer, numThisBlock);
+            } else if (summingGen) {
+                summingGen->fillBlock(inputBuffer, numThisBlock);
+            } else if (aliasGen) {
+                aliasGen->fillBlock(inputBuffer, numThisBlock);
             }
 
             // Copy input to output buffer (processBlock works in-place)
@@ -167,6 +285,8 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
 
             // Process through plugin (modifies outputBuffer in-place)
             plugin.processBlock(outputBuffer, midiBuffer);
+            if (serialPlugin != nullptr)
+                serialPlugin->processBlock(outputBuffer, midiBuffer);
 
             // Build BlockContext
             BlockContext ctx;

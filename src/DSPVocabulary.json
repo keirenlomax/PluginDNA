@@ -1,0 +1,87 @@
+{
+  "schema": "PluginDNA DSP Vocabulary",
+  "version": 1,
+  "principle": "Preserve the manufacturer's parameter name. Add universal, evidence-backed descriptions of the measured DSP dimensions it changes.",
+  "concepts": [
+    {
+      "id": "transfer_symmetry",
+      "name": "Transfer symmetry",
+      "category": "Transfer",
+      "definition": "Whether positive and negative waveform excursions are processed equally.",
+      "engineeringEffect": "Changes waveform symmetry and therefore the balance of even and odd harmonics.",
+      "evidenceFamilies": ["TransferCurve", "THD", "SweepHarmonicFingerprint", "Boundary"]
+    },
+    {
+      "id": "transfer_shape",
+      "name": "Transfer shape",
+      "category": "Transfer",
+      "definition": "The shape and progression of the processor's input-to-output mapping.",
+      "engineeringEffect": "Changes how progressively peaks are bent, compressed, expanded or saturated.",
+      "evidenceFamilies": ["TransferCurve", "RmsPeak", "THD"]
+    },
+    {
+      "id": "harmonic_balance",
+      "name": "Harmonic balance",
+      "category": "Harmonics",
+      "definition": "The distribution of energy across generated harmonic orders.",
+      "engineeringEffect": "Changes which harmonic orders dominate and how the harmonic ladder develops.",
+      "evidenceFamilies": ["THD", "SweepHarmonicFingerprint"]
+    },
+    {
+      "id": "spectral_tilt",
+      "name": "Spectral tilt",
+      "category": "Frequency",
+      "definition": "Broad weighting between low, middle and high frequencies.",
+      "engineeringEffect": "Changes low-frequency lift, midrange emphasis, high-frequency roll-off or overall tonal slope.",
+      "evidenceFamilies": ["LinearResponse", "Residual", "SweepHarmonicFingerprint"]
+    },
+    {
+      "id": "crest_behaviour",
+      "name": "Crest behaviour",
+      "category": "Dynamics",
+      "definition": "The relationship between average signal level and peak level.",
+      "engineeringEffect": "Changes peak density or crest factor without necessarily changing average level by the same amount.",
+      "evidenceFamilies": ["RmsPeak", "TransferCurve", "Timing"]
+    },
+    {
+      "id": "residual_fingerprint",
+      "name": "Residual fingerprint",
+      "category": "Residual",
+      "definition": "The signal added by the processor after the aligned dry component is removed.",
+      "engineeringEffect": "Changes the level, spectrum, density or tonality of the processor's added fingerprint.",
+      "evidenceFamilies": ["Residual"]
+    },
+    {
+      "id": "timing_response",
+      "name": "Timing response",
+      "category": "Timing",
+      "definition": "How energy arrives, overshoots, rings and settles in time.",
+      "engineeringEffect": "Changes onset, ringing, impulse width, energy distribution or settling behaviour.",
+      "evidenceFamilies": ["Timing"]
+    },
+    {
+      "id": "phase_response",
+      "name": "Phase response",
+      "category": "Phase",
+      "definition": "Frequency-dependent timing alignment through the processor.",
+      "engineeringEffect": "Changes phase rotation or group delay across the spectrum.",
+      "evidenceFamilies": ["LinearResponse", "Timing", "Boundary"]
+    },
+    {
+      "id": "signal_interaction",
+      "name": "Signal interaction",
+      "category": "Interaction",
+      "definition": "How simultaneous tones create new sum, difference and higher-order products.",
+      "engineeringEffect": "Changes intermodulation and how complex material becomes denser or remains separated.",
+      "evidenceFamilies": ["Interaction"]
+    },
+    {
+      "id": "boundary_behaviour",
+      "name": "Boundary behaviour",
+      "category": "Limits",
+      "definition": "Behaviour near DC, infrasonic, ultrasonic and level boundaries.",
+      "engineeringEffect": "Changes stability, foldback, DC offset or other edge-of-range behaviour.",
+      "evidenceFamilies": ["Boundary", "THD"]
+    }
+  ]
+}

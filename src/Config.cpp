@@ -81,6 +81,13 @@ Config Config::fromJsonString(const juce::String& jsonString) {
                         }
                     }
                 }
+                if (bucketObj->hasProperty("valueLabels")) {
+                    auto labelsArray = bucketObj->getProperty("valueLabels");
+                    if (labelsArray.isArray()) {
+                        for (int j = 0; j < labelsArray.size(); ++j)
+                            bucket.valueLabels.push_back(labelsArray[j].toString());
+                    }
+                }
 
                 config.parameterBuckets.push_back(bucket);
             }

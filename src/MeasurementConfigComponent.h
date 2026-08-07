@@ -22,6 +22,7 @@ public:
 
 private:
     void updateUI();
+    void setAllAnalyzers(bool enabled);
 
     // Signal type
     juce::Label signalTypeLabel;
@@ -50,12 +51,22 @@ private:
     juce::TextEditor inputGainEditor;
 
     // Analyzers
+    juce::GroupComponent analysisSuiteGroup;
     juce::Label analyzersLabel;
+    juce::TextButton allAnalyzersButton;
+    juce::TextButton noAnalyzersButton;
     juce::ToggleButton rawCsvButton;
     juce::ToggleButton rmsPeakButton;
     juce::ToggleButton transferCurveButton;
     juce::ToggleButton linearResponseButton;
     juce::ToggleButton thdButton;
+    juce::ToggleButton interactionButton;
+    juce::ToggleButton timingButton;
+    juce::ToggleButton residualButton;
+    juce::ToggleButton boundaryButton;
+    juce::ToggleButton stereoButton;
+    juce::ToggleButton summingButton;
+    juce::ToggleButton aliasButton;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MeasurementConfigComponent)
 };

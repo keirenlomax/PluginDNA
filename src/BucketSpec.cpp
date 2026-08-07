@@ -10,6 +10,8 @@ BucketSpec::Strategy BucketSpec::strategyFromString(const juce::String& str) {
         return Strategy::Log;
     if (str.equalsIgnoreCase("EdgeAndCenter"))
         return Strategy::EdgeAndCenter;
+    if (str.equalsIgnoreCase("Enumerated"))
+        return Strategy::Enumerated;
 
     return Strategy::Linear; // default
 }
@@ -19,6 +21,7 @@ std::vector<float> BucketSpec::generateValues() const {
 
     switch (strategy) {
         case Strategy::ExplicitValues:
+        case Strategy::Enumerated:
             result = values;
             break;
 

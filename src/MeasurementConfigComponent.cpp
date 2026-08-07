@@ -55,8 +55,19 @@ MeasurementConfigComponent::MeasurementConfigComponent() {
     inputGainEditor.addListener(this);
     addAndMakeVisible(inputGainEditor);
 
-    analyzersLabel.setText("Analyzers:", juce::dontSendNotification);
+    analysisSuiteGroup.setText("Analysis Suite");
+    addAndMakeVisible(analysisSuiteGroup);
+
+    analyzersLabel.setText("Choose analysers", juce::dontSendNotification);
     addAndMakeVisible(analyzersLabel);
+
+    allAnalyzersButton.setButtonText("All");
+    noAnalyzersButton.setButtonText("None");
+    for (auto* button : { &allAnalyzersButton, &noAnalyzersButton })
+    {
+        button->addListener(this);
+        addAndMakeVisible(button);
+    }
 
     rawCsvButton.setButtonText("Raw CSV");
     rawCsvButton.setToggleState(true, juce::dontSendNotification);
@@ -74,9 +85,49 @@ MeasurementConfigComponent::MeasurementConfigComponent() {
     linearResponseButton.setToggleState(true, juce::dontSendNotification);
     addAndMakeVisible(linearResponseButton);
 
-    thdButton.setButtonText("THD");
+    thdButton.setButtonText("THD / Harmonics");
     thdButton.setToggleState(true, juce::dontSendNotification);
     addAndMakeVisible(thdButton);
+
+    interactionButton.setButtonText("Interaction / IMD");
+    interactionButton.setToggleState(true, juce::dontSendNotification);
+    addAndMakeVisible(interactionButton);
+
+    timingButton.setButtonText("Timing / Phase");
+    timingButton.setToggleState(true, juce::dontSendNotification);
+    addAndMakeVisible(timingButton);
+
+    residualButton.setButtonText("Residual");
+    residualButton.setToggleState(true, juce::dontSendNotification);
+    addAndMakeVisible(residualButton);
+
+    boundaryButton.setButtonText("Boundary");
+    boundaryButton.setToggleState(true, juce::dontSendNotification);
+    addAndMakeVisible(boundaryButton);
+
+    stereoButton.setButtonText("Stereo");
+    stereoButton.setToggleState(true, juce::dontSendNotification);
+    addAndMakeVisible(stereoButton);
+
+    summingButton.setButtonText("Summing");
+    summingButton.setToggleState(true, juce::dontSendNotification);
+    addAndMakeVisible(summingButton);
+
+    aliasButton.setButtonText("Alias Stress");
+    aliasButton.setToggleState(true, juce::dontSendNotification);
+    addAndMakeVisible(aliasButton);
+
+    analyzersLabel.setColour(juce::Label::textColourId, juce::Colours::white);
+    analyzersLabel.setFont(juce::Font(juce::FontOptions(15.0f, juce::Font::bold)));
+    for (auto* toggle : { &rawCsvButton, &rmsPeakButton, &transferCurveButton, &linearResponseButton,
+                          &thdButton, &interactionButton, &timingButton, &residualButton,
+                          &boundaryButton, &stereoButton, &summingButton, &aliasButton })
+    {
+        toggle->setColour(juce::ToggleButton::textColourId, juce::Colours::white);
+        toggle->setColour(juce::ToggleButton::tickColourId, juce::Colours::limegreen);
+        toggle->setColour(juce::ToggleButton::tickDisabledColourId, juce::Colours::grey);
+        toggle->addListener(this);
+    }
 
     updateUI();
 }
@@ -84,59 +135,85 @@ MeasurementConfigComponent::MeasurementConfigComponent() {
 MeasurementConfigComponent::~MeasurementConfigComponent() {}
 
 void MeasurementConfigComponent::paint(juce::Graphics& g) {
-    g.fillAll(juce::Colours::darkgrey);
-    g.setColour(juce::Colours::lightgrey);
-    g.drawRect(getLocalBounds(), 1);
+    g.fillAll(juce::Colour::fromRGB(45, 48, 54));
 }
 
 void MeasurementConfigComponent::resized() {
-    auto bounds = getLocalBounds().reduced(10);
-    int rowHeight = 30;
-    int y = 10;
+    analysisSuiteGroup.setBounds(getLocalBounds());
+    auto bounds = getLocalBounds().reduced(12, 28);
+    constexpr int rowHeight = 28;
+    constexpr int gap = 5;
+
+    analyzersLabel.setBounds(bounds.removeFromTop(24));
+    auto presetRow = bounds.removeFromTop(28);
+    const int presetWidth = 72;
+    allAnalyzersButton.setBounds(presetRow.removeFromLeft(presetWidth));
+    presetRow.removeFromLeft(6);
+    noAnalyzersButton.setBounds(presetRow.removeFromLeft(presetWidth));
+    bounds.removeFromTop(6);
+
+    constexpr int toggleHeight = 27;
+    constexpr int toggleGap = 2;
+    const int halfWidth = (bounds.getWidth() - 8) / 2;
+    auto placePair = [&](juce::ToggleButton& left, juce::ToggleButton& right)
+    {
+        auto row = bounds.removeFromTop(toggleHeight);
+        left.setBounds(row.removeFromLeft(halfWidth));
+        row.removeFromLeft(8);
+        right.setBounds(row);
+        bounds.removeFromTop(toggleGap);
+    };
+    placePair(rawCsvButton, rmsPeakButton);
+    placePair(transferCurveButton, linearResponseButton);
+    placePair(thdButton, interactionButton);
+    placePair(timingButton, residualButton);
+    placePair(boundaryButton, stereoButton);
+    placePair(summingButton, aliasButton);
+    bounds.removeFromTop(10);
+
+    auto placeLabelEditor = [&](juce::Label& label, juce::TextEditor& editor,
+                                int labelWidth = 170, int editorWidth = 110)
+    {
+        auto row = bounds.removeFromTop(rowHeight);
+        label.setBounds(row.removeFromLeft(labelWidth));
+        row.removeFromLeft(8);
+        editor.setBounds(row.removeFromLeft(editorWidth));
+        bounds.removeFromTop(gap);
+    };
 
     auto signalRow = bounds.removeFromTop(rowHeight);
     signalTypeLabel.setBounds(signalRow.removeFromLeft(120));
-    signalTypeCombo.setBounds(signalRow.removeFromLeft(150));
-    bounds.removeFromTop(5);
+    signalRow.removeFromLeft(8);
+    signalTypeCombo.setBounds(signalRow.removeFromLeft(190));
+    bounds.removeFromTop(gap);
 
-    sineFreqLabel.setBounds(bounds.removeFromTop(rowHeight).removeFromLeft(150));
-    sineFreqEditor.setBounds(bounds.removeFromTop(rowHeight).removeFromLeft(100));
-    bounds.removeFromTop(5);
+    if (sineFreqLabel.isVisible())
+        placeLabelEditor(sineFreqLabel, sineFreqEditor);
 
-    auto sweepRow = bounds.removeFromTop(rowHeight);
-    sweepStartLabel.setBounds(sweepRow.removeFromLeft(150));
-    sweepStartEditor.setBounds(sweepRow.removeFromLeft(100));
-    sweepRow.removeFromLeft(20);
-    sweepEndLabel.setBounds(sweepRow.removeFromLeft(150));
-    sweepEndEditor.setBounds(sweepRow.removeFromLeft(100));
-    bounds.removeFromTop(5);
+    if (sweepStartLabel.isVisible())
+    {
+        auto row = bounds.removeFromTop(rowHeight);
+        sweepStartLabel.setBounds(row.removeFromLeft(120));
+        sweepStartEditor.setBounds(row.removeFromLeft(76));
+        row.removeFromLeft(8);
+        sweepEndLabel.setBounds(row.removeFromLeft(110));
+        sweepEndEditor.setBounds(row.removeFromLeft(76));
+        bounds.removeFromTop(gap);
+    }
 
     auto audioRow = bounds.removeFromTop(rowHeight);
-    sampleRateLabel.setBounds(audioRow.removeFromLeft(120));
-    sampleRateEditor.setBounds(audioRow.removeFromLeft(100));
-    audioRow.removeFromLeft(20);
-    secondsLabel.setBounds(audioRow.removeFromLeft(120));
-    secondsEditor.setBounds(audioRow.removeFromLeft(100));
-    audioRow.removeFromLeft(20);
-    blockSizeLabel.setBounds(audioRow.removeFromLeft(100));
-    blockSizeEditor.setBounds(audioRow.removeFromLeft(100));
-    bounds.removeFromTop(5);
+    sampleRateLabel.setBounds(audioRow.removeFromLeft(88));
+    sampleRateEditor.setBounds(audioRow.removeFromLeft(78));
+    audioRow.removeFromLeft(8);
+    secondsLabel.setBounds(audioRow.removeFromLeft(105));
+    secondsEditor.setBounds(audioRow.removeFromLeft(62));
+    audioRow.removeFromLeft(8);
+    blockSizeLabel.setBounds(audioRow.removeFromLeft(70));
+    blockSizeEditor.setBounds(audioRow.removeFromLeft(62));
+    bounds.removeFromTop(gap);
 
-    inputGainLabel.setBounds(bounds.removeFromTop(rowHeight));
-    inputGainEditor.setBounds(bounds.removeFromTop(30));
-    bounds.removeFromTop(5);
-
-    analyzersLabel.setBounds(bounds.removeFromTop(rowHeight));
-    auto analyzerRow = bounds.removeFromTop(rowHeight);
-    rawCsvButton.setBounds(analyzerRow.removeFromLeft(100));
-    analyzerRow.removeFromLeft(10);
-    rmsPeakButton.setBounds(analyzerRow.removeFromLeft(100));
-    analyzerRow.removeFromLeft(10);
-    transferCurveButton.setBounds(analyzerRow.removeFromLeft(120));
-    analyzerRow.removeFromLeft(10);
-    linearResponseButton.setBounds(analyzerRow.removeFromLeft(120));
-    analyzerRow.removeFromLeft(10);
-    thdButton.setBounds(analyzerRow.removeFromLeft(100));
+    inputGainLabel.setBounds(bounds.removeFromTop(24));
+    inputGainEditor.setBounds(bounds.removeFromTop(rowHeight));
 }
 
 void MeasurementConfigComponent::comboBoxChanged(juce::ComboBox* comboBox) {
@@ -150,7 +227,18 @@ void MeasurementConfigComponent::textEditorTextChanged(juce::TextEditor& editor)
 }
 
 void MeasurementConfigComponent::buttonClicked(juce::Button* button) {
-    // Analyzer toggles are handled automatically
+    if (button == &allAnalyzersButton)
+        setAllAnalyzers(true);
+    else if (button == &noAnalyzersButton)
+        setAllAnalyzers(false);
+}
+
+void MeasurementConfigComponent::setAllAnalyzers(bool enabled)
+{
+    for (auto* toggle : { &rawCsvButton, &rmsPeakButton, &transferCurveButton, &linearResponseButton,
+                          &thdButton, &interactionButton, &timingButton, &residualButton,
+                          &boundaryButton, &stereoButton, &summingButton, &aliasButton })
+        toggle->setToggleState(enabled, juce::dontSendNotification);
 }
 
 void MeasurementConfigComponent::updateUI() {
@@ -208,6 +296,20 @@ void MeasurementConfigComponent::fillConfig(Config& config) {
         config.analyzers.push_back("LinearResponse");
     if (thdButton.getToggleState())
         config.analyzers.push_back("Thd");
+    if (interactionButton.getToggleState())
+        config.analyzers.push_back("Interaction");
+    if (timingButton.getToggleState())
+        config.analyzers.push_back("Timing");
+    if (residualButton.getToggleState())
+        config.analyzers.push_back("Residual");
+    if (boundaryButton.getToggleState())
+        config.analyzers.push_back("Boundary");
+    if (stereoButton.getToggleState())
+        config.analyzers.push_back("Stereo");
+    if (summingButton.getToggleState())
+        config.analyzers.push_back("Summing");
+    if (aliasButton.getToggleState())
+        config.analyzers.push_back("Alias");
 }
 
 void MeasurementConfigComponent::loadFromConfig(const Config& config) {
@@ -245,6 +347,13 @@ void MeasurementConfigComponent::loadFromConfig(const Config& config) {
     transferCurveButton.setToggleState(hasAnalyzer("TransferCurve"), juce::dontSendNotification);
     linearResponseButton.setToggleState(hasAnalyzer("LinearResponse"), juce::dontSendNotification);
     thdButton.setToggleState(hasAnalyzer("Thd"), juce::dontSendNotification);
+    interactionButton.setToggleState(hasAnalyzer("Interaction"), juce::dontSendNotification);
+    timingButton.setToggleState(hasAnalyzer("Timing"), juce::dontSendNotification);
+    residualButton.setToggleState(hasAnalyzer("Residual"), juce::dontSendNotification);
+    boundaryButton.setToggleState(hasAnalyzer("Boundary"), juce::dontSendNotification);
+    stereoButton.setToggleState(hasAnalyzer("Stereo"), juce::dontSendNotification);
+    summingButton.setToggleState(hasAnalyzer("Summing"), juce::dontSendNotification);
+    aliasButton.setToggleState(hasAnalyzer("Alias"), juce::dontSendNotification);
 
     updateUI();
 }

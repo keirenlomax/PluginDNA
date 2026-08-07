@@ -6,11 +6,14 @@
 
 struct ParameterBucketConfig {
     juce::String paramName;
-    juce::String strategy; // "Linear", "ExplicitValues", "Log", "EdgeAndCenter"
+    juce::String strategy; // "Linear", "ExplicitValues", "Log", "EdgeAndCenter", "Enumerated"
     float min = 0.0f;
     float max = 1.0f;
     int numBuckets = 0;
     std::vector<float> values;
+    std::vector<juce::String> valueLabels; // labels for Enumerated states
+    float pluginDefaultValue = 0.5f;
+    bool includePluginDefault = true;
 };
 
 struct Config {

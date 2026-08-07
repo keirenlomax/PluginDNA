@@ -46,6 +46,13 @@ private:
         int64_t centreSample = 0;
         double thd = 0.0;
         std::array<double, 9> harmonicRatios {};
+        double unexpectedPowerRatio = 0.0;
+        double aliasPowerRatio = 0.0;
+        double aliasToHarmonicRatio = 0.0;
+        double strongestUnexpectedFrequencyHz = 0.0;
+        double strongestUnexpectedRatio = 0.0;
+        double ladderIntegrity = 1.0;
+        int foldedHarmonicCount = 0;
     };
 
     struct RunThdData

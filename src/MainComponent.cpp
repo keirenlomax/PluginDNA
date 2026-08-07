@@ -2,6 +2,14 @@
 #include "RmsPeakAnalyzer.h"
 #include "ThdAnalyzer.h"
 #include "LinearResponseAnalyzer.h"
+#include "InteractionAnalyzer.h"
+#include "StereoAnalyzer.h"
+#include "SummingAnalyzer.h"
+#include "AliasAnalyzer.h"
+#include "TimingAnalyzer.h"
+#include "ResidualAnalyzer.h"
+#include "BoundaryAnalyzer.h"
+#include "BucketSpec.h"
 #include "TransferCurveAnalyzer.h"
 #include "RawCsvAnalyzer.h"
 #include "MeasurementConfigComponent.h"
@@ -12,6 +20,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <stdexcept>
 
 #include <fstream>
@@ -2005,6 +2014,255 @@ namespace
         return text.toLowerCase().contains(token.toLowerCase());
     }
 
+
+    struct HarmonicFingerprintEvidence
+    {
+        bool available = false;
+        double lowColourDb = -120.0;
+        double midColourDb = -120.0;
+        double highColourDb = -120.0;
+        double overallColourDb = -120.0;
+        double highOrderVsLowOrderDb = 0.0;
+        double secondVsThirdDb = 0.0;
+    };
+
+    HarmonicFingerprintEvidence makeHarmonicFingerprintEvidence(const MeasurementDataset& data)
+    {
+        HarmonicFingerprintEvidence evidence;
+        if (data.isEmpty())
+            return evidence;
+
+        const int runCol = findColumn(data, "runId");
+        const int freqCol = findColumn(data, "fundamentalHz");
+        const int orderCol = findColumn(data, "harmonicOrder");
+        const int magCol = findColumn(data, "magDbRelativeToInput");
+        const int gainCol = findColumn(data, "inputGainDb");
+        if (runCol < 0 || freqCol < 0 || orderCol < 0 || magCol < 0)
+            return evidence;
+
+        struct Accumulator
+        {
+            double lowPower = 0.0, midPower = 0.0, highPower = 0.0, allPower = 0.0;
+            double lowOrderPower = 0.0, highOrderPower = 0.0;
+            double secondPower = 0.0, thirdPower = 0.0;
+            int lowCount = 0, midCount = 0, highCount = 0, allCount = 0;
+            int lowOrderCount = 0, highOrderCount = 0, secondCount = 0, thirdCount = 0;
+        };
+
+        std::map<int, Accumulator> perRun;
+        double closestGainDistance = std::numeric_limits<double>::max();
+        double referenceGain = -18.0;
+        if (gainCol >= 0)
+        {
+            for (const auto& row : data.rows)
+            {
+                if ((int) row.size() <= gainCol) continue;
+                const double distance = std::abs(row[(std::size_t) gainCol] + 18.0);
+                if (distance < closestGainDistance)
+                {
+                    closestGainDistance = distance;
+                    referenceGain = row[(std::size_t) gainCol];
+                }
+            }
+        }
+
+        for (const auto& row : data.rows)
+        {
+            const int required = std::max({ runCol, freqCol, orderCol, magCol, gainCol });
+            if ((int) row.size() <= required) continue;
+            if (gainCol >= 0 && std::abs(row[(std::size_t) gainCol] - referenceGain) > 0.25)
+                continue;
+
+            const int order = (int) std::lround(row[(std::size_t) orderCol]);
+            if (order < 2 || order > 7) continue;
+            const double frequency = row[(std::size_t) freqCol];
+            const double db = juce::jlimit(-120.0, 24.0, row[(std::size_t) magCol]);
+            const double power = std::pow(10.0, db / 10.0);
+            auto& a = perRun[(int) std::lround(row[(std::size_t) runCol])];
+
+            a.allPower += power; ++a.allCount;
+            if (frequency < 250.0) { a.lowPower += power; ++a.lowCount; }
+            else if (frequency < 4000.0) { a.midPower += power; ++a.midCount; }
+            else { a.highPower += power; ++a.highCount; }
+
+            if (order <= 3) { a.lowOrderPower += power; ++a.lowOrderCount; }
+            if (order >= 5) { a.highOrderPower += power; ++a.highOrderCount; }
+            if (order == 2) { a.secondPower += power; ++a.secondCount; }
+            if (order == 3) { a.thirdPower += power; ++a.thirdCount; }
+        }
+
+        const auto meanDb = [](double power, int count)
+        {
+            return count > 0 ? 10.0 * std::log10(std::max(power / (double) count, 1.0e-12)) : -120.0;
+        };
+
+        // Use the run with the strongest meaningful nonlinear contribution at the
+        // reference gain. This describes the processor's available colour without
+        // letting a bypass/neutral setting dilute the fingerprint.
+        double strongest = -120.0;
+        for (const auto& [runId, a] : perRun)
+        {
+            juce::ignoreUnused(runId);
+            const double overall = meanDb(a.allPower, a.allCount);
+            if (overall <= strongest) continue;
+            strongest = overall;
+            evidence.available = true;
+            evidence.overallColourDb = overall;
+            evidence.lowColourDb = meanDb(a.lowPower, a.lowCount);
+            evidence.midColourDb = meanDb(a.midPower, a.midCount);
+            evidence.highColourDb = meanDb(a.highPower, a.highCount);
+            evidence.highOrderVsLowOrderDb = meanDb(a.highOrderPower, a.highOrderCount)
+                                              - meanDb(a.lowOrderPower, a.lowOrderCount);
+            evidence.secondVsThirdDb = meanDb(a.secondPower, a.secondCount)
+                                        - meanDb(a.thirdPower, a.thirdCount);
+        }
+        return evidence;
+    }
+
+    struct ProducerVocabularySummary
+    {
+        juce::String character;
+        juce::String behaviour;
+    };
+
+    ProducerVocabularySummary makeProducerVocabularySummary(const IdentitySummary& identity,
+                                                              const LevelSummary& level,
+                                                              const HarmonicSummary& harmonic,
+                                                              const ToneSummary& tone,
+                                                              const BehaviourSummary& drive,
+                                                              const TemporalSummary& temporal,
+                                                              const HarmonicFingerprintEvidence& fingerprint)
+    {
+        juce::StringArray characterWords;
+        juce::StringArray behaviourWords;
+
+        const auto addUnique = [](juce::StringArray& words, const juce::String& word)
+        {
+            if (!words.contains(word, true))
+                words.add(word);
+        };
+
+        const auto all = identity.role + " " + identity.why + " " + harmonic.identity + " "
+                       + harmonic.balance + " " + tone.bass + " " + tone.midrange + " "
+                       + tone.treble + " " + drive.headline + " " + temporal.response + " "
+                       + temporal.attack + " " + temporal.after + " " + level.level + " "
+                       + level.peaks + " " + level.dynamics;
+
+        struct WordScore { juce::String word; double score = 0.0; };
+        std::vector<WordScore> scores {
+            { "Sweet", 0.0 }, { "Warm", 0.0 }, { "Dense", 0.0 },
+            { "Full", 0.0 }, { "Focused", 0.0 }, { "Airy", 0.0 },
+            { "Grindy", 0.0 }, { "Smooth", 0.0 }, { "Present", 0.0 },
+            { "Articulate", 0.0 }, { "Punchy", 0.0 }, { "Forward", 0.0 },
+            { "Subtle", 0.0 }
+        };
+        const auto score = [&scores](const juce::String& word, double amount)
+        {
+            for (auto& item : scores)
+                if (item.word == word) { item.score += amount; return; }
+        };
+
+        // Existing sine, tone and temporal evidence.
+        if (all.containsIgnoreCase("2nd harmonic") || all.containsIgnoreCase("even-heavy"))
+            score("Sweet", 70.0);
+        if (all.containsIgnoreCase("dense") || all.containsIgnoreCase("high-order"))
+            score("Dense", 55.0);
+        if (all.containsIgnoreCase("preserves") || all.containsIgnoreCase("lifts the first attack"))
+        {
+            score("Present", 65.0);
+            score("Articulate", 70.0);
+        }
+        if (all.containsIgnoreCase("punchier") || all.containsIgnoreCase("more open"))
+            score("Punchy", 55.0);
+        // Tone-summary text is only a fallback. When the H2-H7 fingerprint
+        // exists, frequency-specific harmonic evidence makes these decisions.
+        if (!fingerprint.available)
+        {
+            if (all.containsIgnoreCase("roll-off") || all.containsIgnoreCase("softens"))
+                score("Smooth", 40.0);
+            if (all.containsIgnoreCase("bass lift") || all.containsIgnoreCase("low end"))
+                score("Full", 45.0);
+            if (all.containsIgnoreCase("midrange forward") || all.containsIgnoreCase("mids forward"))
+                score("Forward", 55.0);
+            if (all.containsIgnoreCase("treble lift") || all.containsIgnoreCase("air")
+                || all.containsIgnoreCase("high-frequency lift"))
+                score("Airy", 55.0);
+        }
+
+        // Frequency-specific H2-H7 evidence from the sweep fingerprint. These rules
+        // compare regions, so they generalise to any processor rather than any name.
+        if (fingerprint.available)
+        {
+            const double lowVsMid = fingerprint.lowColourDb - fingerprint.midColourDb;
+            const double highVsMid = fingerprint.highColourDb - fingerprint.midColourDb;
+            const double highVsLow = fingerprint.highColourDb - fingerprint.lowColourDb;
+
+            if (lowVsMid > 2.5) score("Warm", juce::jlimit(35.0, 90.0, 45.0 + lowVsMid * 2.0));
+            // Full requires substantial colour, not merely a low-frequency bias.
+            if (lowVsMid > 1.5 && fingerprint.overallColourDb > -30.0)
+                score("Full", juce::jlimit(20.0, 58.0, 25.0 + lowVsMid * 0.8));
+            if (lowVsMid > 3.0 && highVsMid > 1.5) score("Focused", 75.0);
+            else if (lowVsMid > 5.0) score("Focused", 65.0);
+
+            if (highVsLow > 2.5 && fingerprint.highOrderVsLowOrderDb < -3.0)
+                score("Airy", 65.0);
+            if (highVsMid > 2.5 && fingerprint.highOrderVsLowOrderDb > -5.0)
+                score("Grindy", 75.0);
+            if (fingerprint.highOrderVsLowOrderDb < -8.0)
+                score("Smooth", 50.0);
+            if (fingerprint.secondVsThirdDb > 3.0)
+                score("Sweet", 35.0);
+            if (fingerprint.overallColourDb > -32.0
+                && std::abs(lowVsMid) < 8.0 && std::abs(highVsMid) < 8.0)
+                score("Dense", 45.0);
+            if (fingerprint.overallColourDb < -30.0)
+                score("Subtle", 35.0);
+        }
+
+        if (all.containsIgnoreCase("largely unchanged")
+            || all.containsIgnoreCase("no adjustment needed")
+            || all.containsIgnoreCase("mostly static"))
+            score("Subtle", 35.0);
+
+        std::stable_sort(scores.begin(), scores.end(), [](const WordScore& a, const WordScore& b)
+        {
+            return a.score > b.score;
+        });
+        for (const auto& item : scores)
+        {
+            if (item.score < 50.0) continue;
+            addUnique(characterWords, item.word);
+            if (characterWords.size() == 3) break;
+        }
+
+        if (all.containsIgnoreCase("stateful") || all.containsIgnoreCase("signal memory"))
+            addUnique(behaviourWords, "Stateful");
+        if (all.containsIgnoreCase("responsive"))
+            addUnique(behaviourWords, "Responsive");
+        if (all.containsIgnoreCase("progressive"))
+            addUnique(behaviourWords, "Progressive");
+        if (all.containsIgnoreCase("harmonic") || all.containsIgnoreCase("saturat") || all.containsIgnoreCase("clip"))
+            addUnique(behaviourWords, "Nonlinear");
+        if (all.containsIgnoreCase("mostly static") || all.containsIgnoreCase("little meaningful change"))
+            addUnique(behaviourWords, "Static");
+        if (identity.role.containsIgnoreCase("clean gain"))
+            addUnique(behaviourWords, "Transparent");
+
+        while (characterWords.size() > 3)
+            characterWords.remove(characterWords.size() - 1);
+        while (behaviourWords.size() > 3)
+            behaviourWords.remove(behaviourWords.size() - 1);
+
+        const auto character = characterWords.isEmpty()
+            ? juce::String("CHARACTER  Subtle")
+            : juce::String("CHARACTER  ") + characterWords.joinIntoString(" · ");
+        const auto behaviour = behaviourWords.isEmpty()
+            ? juce::String("BEHAVIOUR  Static")
+            : juce::String("BEHAVIOUR  ") + behaviourWords.joinIntoString(" · ");
+
+        return { character, behaviour };
+    }
+
     IdentitySummary makeIdentitySummary(const LevelSummary& level,
                                         const HarmonicSummary& harmonic,
                                         const ToneSummary& tone,
@@ -2155,10 +2413,650 @@ namespace
         return { best.role, best.why, watch };
     }
 
+
+    juce::var makeNumericStats(double minimum, double maximum, double mean, std::int64_t count)
+    {
+        auto* object = new juce::DynamicObject();
+        object->setProperty("min", minimum);
+        object->setProperty("max", maximum);
+        object->setProperty("mean", mean);
+        object->setProperty("count", static_cast<juce::int64>(count));
+        return juce::var(object);
+    }
+
+
+    bool isEvidenceSettingColumn(const juce::String& name, const Config& config)
+    {
+        // Evidence settings are deliberately strict: only the drive bucket and
+        // parameters that PluginDNA intentionally changed for this run belong
+        // here. Every analyser-produced column is a measurement, even when a
+        // future analyser introduces a metric name we have never seen before.
+        if (name == "inputGainDb")
+            return true;
+        for (const auto& bucket : config.parameterBuckets)
+            if (name == bucket.paramName)
+                return true;
+        return false;
+    }
+
+    juce::var deriveRunEvidenceMetrics(const juce::String& filename,
+                                       const MeasurementDataset& dataset,
+                                       const std::vector<const std::vector<double>*>& rows)
+    {
+        auto* derived = new juce::DynamicObject();
+        const auto index = [&dataset](const char* name) { return findColumn(dataset, name); };
+        const auto value = [](const std::vector<double>& row, int column)
+        {
+            return column >= 0 && static_cast<std::size_t>(column) < row.size()
+                ? row[static_cast<std::size_t>(column)]
+                : std::numeric_limits<double>::quiet_NaN();
+        };
+        const auto db = [](double amplitude)
+        {
+            return 20.0 * std::log10(std::max(std::abs(amplitude), 1.0e-15));
+        };
+        const auto collect = [&](const char* name, const std::function<bool(const std::vector<double>&)>& include = {})
+        {
+            std::vector<double> values;
+            const int c = index(name);
+            if (c < 0) return values;
+            for (const auto* row : rows)
+            {
+                if (include && !include(*row)) continue;
+                const double v = value(*row, c);
+                if (std::isfinite(v)) values.push_back(v);
+            }
+            return values;
+        };
+        const auto mean = [](const std::vector<double>& values)
+        {
+            if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
+            return std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(values.size());
+        };
+        const auto stdev = [&](const std::vector<double>& values)
+        {
+            if (values.size() < 2) return 0.0;
+            const double m = mean(values);
+            double sum = 0.0;
+            for (double v : values) sum += (v - m) * (v - m);
+            return std::sqrt(sum / static_cast<double>(values.size()));
+        };
+        const auto add = [derived](const juce::Identifier& name, double v)
+        {
+            if (std::isfinite(v)) derived->setProperty(name, v);
+        };
+        const auto addStats = [&](const juce::Identifier& name, const std::vector<double>& values)
+        {
+            if (values.empty()) return;
+            const auto mm = std::minmax_element(values.begin(), values.end());
+            auto* stats = new juce::DynamicObject();
+            stats->setProperty("min", *mm.first);
+            stats->setProperty("max", *mm.second);
+            stats->setProperty("mean", mean(values));
+            stats->setProperty("standardDeviation", stdev(values));
+            stats->setProperty("count", static_cast<juce::int64>(values.size()));
+            derived->setProperty(name, juce::var(stats));
+        };
+
+        if (filename.containsIgnoreCase("rms_peak"))
+        {
+            const int ri=index("rmsInL"), ro=index("rmsOutL"), pi=index("peakInL"), po=index("peakOutL");
+            std::vector<double> level, peak, crestIn, crestOut, crestChange;
+            for (const auto* row : rows)
+            {
+                const double a=value(*row,ri), b=value(*row,ro), c=value(*row,pi), d=value(*row,po);
+                if (!(a>0&&b>0&&c>0&&d>0)) continue;
+                const double li=db(b)-db(a), pk=db(d)-db(c), ci=db(c)-db(a), co=db(d)-db(b);
+                level.push_back(li); peak.push_back(pk); crestIn.push_back(ci); crestOut.push_back(co); crestChange.push_back(co-ci);
+            }
+            addStats("levelChangeDb", level); addStats("peakChangeDb", peak);
+            addStats("crestFactorInDb", crestIn); addStats("crestFactorOutDb", crestOut);
+            addStats("crestFactorChangeDb", crestChange);
+            if (!level.empty() && !peak.empty())
+            {
+                add("peakMinusLevelChangeDb", mean(peak)-mean(level));
+                add("averageGainDb", mean(level));
+                add("gainVarianceDb", stdev(level));
+                add("peakGainVarianceDb", stdev(peak));
+                add("dynamicHeadroomChangeDb", -mean(peak));
+                const double delta = mean(peak) - mean(level);
+                add("compressionExpansionIndexDb", delta);
+                add("compressionAmountDb", std::max(0.0, -delta));
+                add("expansionAmountDb", std::max(0.0, delta));
+                add("levelTrackingErrorDb", std::abs(mean(level)));
+                add("peakTrackingErrorDb", std::abs(mean(peak)));
+            }
+        }
+        else if (filename.containsIgnoreCase("grid_thd"))
+        {
+            const auto thd=collect("thd"); addStats("thd", thd);
+            double evenPower=0.0, oddPower=0.0;
+            std::vector<double> ladder;
+            for (int h=2; h<=10; ++h)
+            {
+                const auto vals=collect(("h"+std::to_string(h)).c_str());
+                if (vals.empty()) continue;
+                const double m=mean(vals); add("h"+juce::String(h), m); ladder.push_back(std::max(m,1.0e-15));
+                const double pwr=m*m; if ((h%2)==0) evenPower+=pwr; else oddPower+=pwr;
+            }
+            if (evenPower>0 || oddPower>0)
+            {
+                const double oddVsEvenDb = 10.0*std::log10(std::max(oddPower,1.0e-30)/std::max(evenPower,1.0e-30));
+                add("oddEvenPowerRatioDb", oddVsEvenDb);
+                add("evenOddPowerRatioDb", -oddVsEvenDb);
+            }
+            if (ladder.size()>=2)
+            {
+                std::vector<double> slopes;
+                double weightedOrder = 0.0, totalAmplitude = 0.0, entropy = 0.0;
+                int significantCount = 0, highestSignificant = 0;
+                for (std::size_t i=1;i<ladder.size();++i) slopes.push_back(db(ladder[i])-db(ladder[i-1]));
+                for (std::size_t i=0;i<ladder.size();++i)
+                {
+                    const double a = ladder[i];
+                    totalAmplitude += a;
+                    weightedOrder += static_cast<double>(i + 2) * a;
+                    if (db(a) > -100.0) { ++significantCount; highestSignificant = static_cast<int>(i + 2); }
+                }
+                if (totalAmplitude > 0.0)
+                {
+                    for (double a : ladder) { const double p = a / totalAmplitude; if (p > 0.0) entropy -= p * std::log2(p); }
+                    add("harmonicCentroidOrder", weightedOrder / totalAmplitude);
+                    add("harmonicEntropyBits", entropy);
+                }
+                add("harmonicLadderMeanStepDb", mean(slopes));
+                add("harmonicDecaySlopeDbPerOrder", mean(slopes));
+                add("harmonicLadderStepVariationDb", stdev(slopes));
+                add("harmonicLadderSmoothness", 1.0 / (1.0 + stdev(slopes)));
+                add("harmonicDensity", static_cast<double>(significantCount) / static_cast<double>(ladder.size()));
+                add("highestSignificantHarmonic", highestSignificant);
+                add("ladderContinuity", static_cast<double>(significantCount) / std::max(1, highestSignificant - 1));
+            }
+        }
+        else if (filename.containsIgnoreCase("transfer_curves"))
+        {
+            const int xc=index("x"), yc=index("meanY");
+            std::vector<std::pair<double,double>> points;
+            for(const auto* row:rows){const double x=value(*row,xc),y=value(*row,yc);if(std::isfinite(x)&&std::isfinite(y))points.push_back({x,y});}
+            std::sort(points.begin(),points.end());
+            if(points.size()>=3)
+            {
+                double maxDeviation=0.0, posErr=0.0, negErr=0.0; int posN=0,negN=0, reversals=0, inflections=0;
+                std::vector<double> slopes;
+                for(const auto& pt:points){maxDeviation=std::max(maxDeviation,std::abs(pt.second-pt.first));if(pt.first>=0){posErr+=pt.second-pt.first;++posN;}else{negErr+=pt.second-pt.first;++negN;}}
+                for(std::size_t i=1;i<points.size();++i){const double dx=points[i].first-points[i-1].first;if(std::abs(dx)>1e-12)slopes.push_back((points[i].second-points[i-1].second)/dx);}
+                for(std::size_t i=1;i<slopes.size();++i){if(slopes[i]<0&&slopes[i-1]>=0)++reversals;if((slopes[i]-slopes[i-1])*(i>1?slopes[i-1]-slopes[i-2]:0.0)<0)++inflections;}
+                const double meanLocalSlope = mean(slopes);
+                add("maxStaticDeviation",maxDeviation); add("meanSlope",meanLocalSlope); add("slopeVariation",stdev(slopes));
+                add("localSlopeMean", meanLocalSlope);
+                add("localSlopeMinimum",slopes.empty()?NAN:*std::min_element(slopes.begin(),slopes.end()));
+                add("localSlopeMaximum",slopes.empty()?NAN:*std::max_element(slopes.begin(),slopes.end()));
+                add("minimumLocalSlope",slopes.empty()?NAN:*std::min_element(slopes.begin(),slopes.end()));
+                add("maximumLocalSlope",slopes.empty()?NAN:*std::max_element(slopes.begin(),slopes.end()));
+                double localSlopeAtZero = std::numeric_limits<double>::quiet_NaN();
+                double closestZero = std::numeric_limits<double>::max();
+                for (std::size_t i=0; i<slopes.size(); ++i)
+                {
+                    const double midpoint = 0.5 * (points[i].first + points[i+1].first);
+                    if (std::abs(midpoint) < closestZero) { closestZero = std::abs(midpoint); localSlopeAtZero = slopes[i]; }
+                }
+                add("localSlopeAtZero", localSlopeAtZero);
+                const double asymmetry=(posN?posErr/posN:0.0)+(negN?negErr/negN:0.0);
+                const double symmetryIndex = 1.0/(1.0+std::abs(asymmetry));
+                add("asymmetryError",asymmetry); add("symmetryScore",symmetryIndex); add("symmetryIndex",symmetryIndex);
+                double deviationPower = 0.0, gainErrorPower = 0.0;
+                for (const auto& pt : points)
+                {
+                    const double nonlinearDeviation = pt.second - meanLocalSlope * pt.first;
+                    deviationPower += nonlinearDeviation * nonlinearDeviation;
+                    const double gainError = (meanLocalSlope - 1.0) * pt.first;
+                    gainErrorPower += gainError * gainError;
+                }
+                const double nonlinearRms = std::sqrt(deviationPower / points.size());
+                const double gainErrorRms = std::sqrt(gainErrorPower / points.size());
+                add("saturationEfficiency", nonlinearRms / std::max(1.0e-15, nonlinearRms + gainErrorRms));
+                add("foldbackReversalCount",reversals); add("inflectionCount",inflections);
+                int nearLinear=0, compressing=0, expanding=0, dead=0; double kneeInput=std::numeric_limits<double>::quiet_NaN();
+                for(std::size_t i=0;i<slopes.size();++i)
+                {
+                    const double sl=slopes[i];
+                    if(std::abs(sl-1.0)<0.05) ++nearLinear;
+                    if(sl<0.95) ++compressing;
+                    if(sl>1.05) ++expanding;
+                    if(std::abs(sl)<0.05) ++dead;
+                    if(!std::isfinite(kneeInput) && std::abs(sl-1.0)>0.10) kneeInput=std::abs(points[i].first);
+                }
+                if(!slopes.empty())
+                {
+                    add("linearRegionFraction",static_cast<double>(nearLinear)/slopes.size());
+                    add("compressionRegionFraction",static_cast<double>(compressing)/slopes.size());
+                    add("expansionRegionFraction",static_cast<double>(expanding)/slopes.size());
+                    add("deadZoneFraction",static_cast<double>(dead)/slopes.size());
+                    add("meanCompressionRatio", mean(slopes)>0.0 ? 1.0/mean(slopes) : 0.0);
+                }
+                add("estimatedKneeInput",kneeInput);
+            }
+        }
+        else if (filename.containsIgnoreCase("linear_response"))
+        {
+            const int fc=index("freqHz"), mc=index("magDb");
+            struct Band{double lo,hi;const char* name;};
+            const Band bands[]={{20,60,"subDb"},{60,200,"bassDb"},{200,800,"lowMidDb"},{800,3000,"midDb"},{3000,7000,"presenceDb"},{7000,14000,"highDb"},{14000,24000,"airDb"}};
+            std::vector<std::pair<double,double>> response;
+            for(const auto* row:rows){const double f=value(*row,fc),m=value(*row,mc);if(f>0&&std::isfinite(m))response.push_back({f,m});}
+            for(const auto& band:bands){std::vector<double> vals;for(const auto& p:response)if(p.first>=band.lo&&p.first<band.hi)vals.push_back(p.second);add(band.name,mean(vals));}
+            if(!response.empty())
+            {
+                auto maxIt=std::max_element(response.begin(),response.end(),[](auto&a,auto&b){return a.second<b.second;});
+                auto minIt=std::min_element(response.begin(),response.end(),[](auto&a,auto&b){return a.second<b.second;});
+                add("largestBoostDb",maxIt->second);add("largestBoostFrequencyHz",maxIt->first);add("largestCutDb",minIt->second);add("largestCutFrequencyHz",minIt->first);
+                std::vector<double> mags;for(auto&p:response)mags.push_back(p.second);add("responseRippleDb",*std::max_element(mags.begin(),mags.end())-*std::min_element(mags.begin(),mags.end()));
+                std::sort(response.begin(),response.end());
+                const double logSpan=std::log2(response.back().first/response.front().first);
+                if(logSpan>0.0) add("overallTiltDbPerOctave",(response.back().second-response.front().second)/logSpan);
+                double weightSum=0.0, centroid=0.0, spread=0.0;
+                for(const auto& p:response){const double w=std::pow(10.0,p.second/20.0);weightSum+=w;centroid+=p.first*w;}
+                if(weightSum>0.0){centroid/=weightSum;for(const auto& p:response){const double w=std::pow(10.0,p.second/20.0);spread+=(p.first-centroid)*(p.first-centroid)*w;}add("spectralCentroidHz",centroid);add("spectralSpreadHz",std::sqrt(spread/weightSum));}
+                int resonances=0; double strongestProminence=0.0, strongestQ=0.0;
+                for(std::size_t i=1;i+1<response.size();++i)
+                {
+                    const double prominence=response[i].second-0.5*(response[i-1].second+response[i+1].second);
+                    if(prominence>0.25){++resonances;strongestProminence=std::max(strongestProminence,prominence);const double bw=std::max(1.0,response[i+1].first-response[i-1].first);strongestQ=std::max(strongestQ,response[i].first/bw);}
+                }
+                add("resonanceCount",resonances);add("strongestResonanceProminenceDb",strongestProminence);add("strongestResonanceQEstimate",strongestQ);
+            }
+        }
+        else if (filename.containsIgnoreCase("harmonic_fingerprint"))
+        {
+            const int fc=index("fundamentalHz"), hc=index("harmonicOrder"), mc=index("magDbRelativeToInput");
+            double lowP=0,highP=0; std::vector<double> low,mid,high;
+            for(int h=2;h<=7;++h)
+            {
+                std::vector<double> vals;
+                for(const auto* row:rows)if(std::llround(value(*row,hc))==h){const double m=value(*row,mc),f=value(*row,fc);if(std::isfinite(m)){vals.push_back(m);if(f<250)low.push_back(m);else if(f<3000)mid.push_back(m);else high.push_back(m);}}
+                addStats("h"+juce::String(h)+"AcrossFrequencyDb",vals);
+                for(double m:vals){double pwr=std::pow(10.0,m/10.0);if(h<=3)lowP+=pwr;else highP+=pwr;}
+            }
+            add("lowBandHarmonicDb",mean(low));add("midBandHarmonicDb",mean(mid));add("highBandHarmonicDb",mean(high));
+            if(lowP>0)add("highOrderVsLowOrderDb",10.0*std::log10(std::max(highP,1e-30)/lowP));
+        }
+        else if (filename.containsIgnoreCase("residual_dna"))
+        {
+            addStats("overallResidualDb",collect("residualDbRelativeToOutput")); addStats("lowResidualDb",collect("lowResidualDb"));
+            addStats("midResidualDb",collect("midResidualDb")); addStats("highResidualDb",collect("highResidualDb")); addStats("ultrasonicResidualDb",collect("ultrasonicResidualDb"));
+            addStats("alignmentLagSamples",collect("lagSamples")); addStats("alignmentGainDb",collect("gainDb"));
+            const auto overall=collect("residualDbRelativeToOutput"), low=collect("lowResidualDb"), mid=collect("midResidualDb"), high=collect("highResidualDb"), ultra=collect("ultrasonicResidualDb");
+            add("lowVsMidResidualDb",mean(low)-mean(mid));
+            add("highVsMidResidualDb",mean(high)-mean(mid));
+            add("ultrasonicVsHighResidualDb",mean(ultra)-mean(high));
+            if(!overall.empty()) add("residualDynamicVariationDb",*std::max_element(overall.begin(),overall.end())-*std::min_element(overall.begin(),overall.end()));
+            const double la=std::pow(10.0,mean(low)/20.0), ma=std::pow(10.0,mean(mid)/20.0), ha=std::pow(10.0,mean(high)/20.0), ua=std::pow(10.0,mean(ultra)/20.0);
+            const double total=la+ma+ha+ua;
+            if(total>0.0){add("residualSpectralCentroidHz",(100.0*la+1000.0*ma+8000.0*ha+24000.0*ua)/total);add("residualLowEnergyFraction",la/total);add("residualMidEnergyFraction",ma/total);add("residualHighEnergyFraction",ha/total);add("residualUltrasonicEnergyFraction",ua/total);}
+            addStats("residualCentroidHz", collect("residualSpectralCentroidHz"));
+            addStats("residualBandwidthHz", collect("residualEffectiveBandwidthHz"));
+            addStats("residualEntropyBits", collect("residualSpectralEntropyBits"));
+            addStats("residualEntropyNormalized", collect("residualSpectralEntropyNormalized"));
+            add("residualSpectralTiltDb",mean(high)-mean(low));
+        }
+        else if (filename.containsIgnoreCase("interaction_dna"))
+        {
+            const int cc=index("productClass"); auto all=collect("magDbRelativeToInput"); addStats("allProductsDb",all);
+            for(int cls=1;cls<=4;++cls)addStats("productClass"+juce::String(cls)+"Db",collect("magDbRelativeToInput",[&](const std::vector<double>& r){return std::llround(value(r,cc))==cls;}));
+            if(!all.empty())
+            {
+                add("worstProductDb",*std::max_element(all.begin(),all.end()));
+                add("productDensityAboveMinus80Db",static_cast<double>(std::count_if(all.begin(),all.end(),[](double v){return v>-80.0;}))/all.size());
+                add("productDensityAboveMinus100Db",static_cast<double>(std::count_if(all.begin(),all.end(),[](double v){return v>-100.0;}))/all.size());
+                add("interactionComplexity",stdev(all));
+                double sumPower=0.0;for(double v:all)sumPower+=std::pow(10.0,v/10.0);add("totalInteractionPowerDb",10.0*std::log10(std::max(sumPower,1.0e-30)));
+            }
+        }
+        else if (filename.containsIgnoreCase("timing_dna"))
+        {
+            const int rc=index("recordType"),fc=index("frequencyHz"),pc=index("phaseDegrees");
+            const auto summary=[&](const std::vector<double>& r){return std::llround(value(r,rc))==2;};
+            addStats("latencySamples",collect("latencySamples",summary));addStats("latencyMs",collect("latencyMs",summary));addStats("preRingingDb",collect("preRingingDb",summary));
+            addStats("postRingingDb",collect("postRingingDb",summary));addStats("settlingMs",collect("settlingMs",summary));addStats("overshootDb",collect("overshootDb",summary));
+            std::vector<std::pair<double,double>> phase;for(const auto* row:rows)if(std::llround(value(*row,rc))==1){double f=value(*row,fc),p=value(*row,pc);if(f>0&&std::isfinite(p))phase.push_back({f,p});}
+            std::sort(phase.begin(),phase.end());std::vector<double> gd, phaseValues, lowPhase, midPhase, highPhase, lowGd, midGd, highGd;
+            for(const auto& p:phase){phaseValues.push_back(p.second);if(p.first<200)lowPhase.push_back(p.second);else if(p.first<3000)midPhase.push_back(p.second);else highPhase.push_back(p.second);}
+            for(std::size_t i=1;i<phase.size();++i){double df=phase[i].first-phase[i-1].first;if(df<=0)continue;double dp=phase[i].second-phase[i-1].second;while(dp>180)dp-=360;while(dp<-180)dp+=360;const double g=-dp/360.0/df*1000.0;gd.push_back(g);const double f=0.5*(phase[i].first+phase[i-1].first);if(f<200)lowGd.push_back(g);else if(f<3000)midGd.push_back(g);else highGd.push_back(g);}
+            addStats("phaseRotationDegrees",phaseValues);addStats("lowPhaseDegrees",lowPhase);addStats("midPhaseDegrees",midPhase);addStats("highPhaseDegrees",highPhase);
+            addStats("groupDelayMs",gd);addStats("lowGroupDelayMs",lowGd);addStats("midGroupDelayMs",midGd);addStats("highGroupDelayMs",highGd);
+            if(!phaseValues.empty()){add("maximumAbsolutePhaseRotationDegrees",std::abs(*std::max_element(phaseValues.begin(),phaseValues.end(),[](double a,double b){return std::abs(a)<std::abs(b);})));add("phaseRotationVariance",stdev(phaseValues));}
+        }
+        else if (filename.containsIgnoreCase("alias_stress"))
+        {
+            const auto aliasDb = collect("aliasPowerDb");
+            const auto aliasRatio = collect("aliasPowerRatio");
+            const auto legalRatio = collect("legalHarmonicPowerRatio");
+            const auto folds = collect("detectedFoldCount");
+            const auto predicted = collect("predictedFoldCount");
+            const auto strongestFreq = collect("strongestAliasFrequencyHz");
+            const auto strongestRatio = collect("strongestAliasRatio");
+            const auto integrity = collect("ladderIntegrity");
+            const auto clean = collect("cleanAtMinus90Db");
+            addStats("aliasPowerDb", aliasDb);
+            addStats("aliasPowerRatio", aliasRatio);
+            addStats("legalHarmonicPowerRatio", legalRatio);
+            addStats("detectedFoldCount", folds);
+            addStats("predictedFoldCount", predicted);
+            addStats("strongestAliasFrequencyHz", strongestFreq);
+            addStats("strongestAliasRatio", strongestRatio);
+            addStats("ladderIntegrity", integrity);
+            if (!aliasDb.empty()) add("worstAliasDb", *std::max_element(aliasDb.begin(), aliasDb.end()));
+            if (!folds.empty()) add("maximumDetectedFoldCount", *std::max_element(folds.begin(), folds.end()));
+            if (!integrity.empty()) add("minimumLadderIntegrity", *std::min_element(integrity.begin(), integrity.end()));
+
+            const int fc = index("fundamentalHz"), ac = index("aliasPowerDb");
+            double highestClean = std::numeric_limits<double>::quiet_NaN();
+            double firstDirty = std::numeric_limits<double>::quiet_NaN();
+            for (const auto* row : rows)
+            {
+                const double f = value(*row, fc), a = value(*row, ac);
+                if (!(f > 0.0) || !std::isfinite(a)) continue;
+                if (a <= -90.0) highestClean = std::isfinite(highestClean) ? std::max(highestClean, f) : f;
+                else firstDirty = std::isfinite(firstDirty) ? std::min(firstDirty, f) : f;
+            }
+            add("highestCleanFundamentalHzAtMinus90Db", highestClean);
+            add("firstAliasFundamentalHzAboveMinus90Db", firstDirty);
+            if (!clean.empty()) add("cleanTestFractionAtMinus90Db", mean(clean));
+        }
+        else if (filename.containsIgnoreCase("stereo_dna"))
+        {
+            addStats("leftOnlyLeakDb", collect("leftOnlyLeakDb"));
+            addStats("rightOnlyLeakDb", collect("rightOnlyLeakDb"));
+            addStats("midChannelMismatchDb", collect("midChannelMismatchDb"));
+            addStats("sideChannelMismatchDb", collect("sideChannelMismatchDb"));
+            addStats("midToSideLeakDb", collect("midToSideLeakDb"));
+            addStats("sideToMidLeakDb", collect("sideToMidLeakDb"));
+            addStats("midCorrelation", collect("midCorrelation"));
+            addStats("sideCorrelation", collect("sideCorrelation"));
+            const auto lr = collect("leftOnlyLeakDb"), rl = collect("rightOnlyLeakDb");
+            if (!lr.empty() && !rl.empty()) add("crosstalkAsymmetryDb", std::abs(mean(lr) - mean(rl)));
+            const auto mm = collect("midChannelMismatchDb"), sm = collect("sideChannelMismatchDb");
+            if (!mm.empty() && !sm.empty()) add("maximumChannelMismatchDb", std::max(*std::max_element(mm.begin(), mm.end()), *std::max_element(sm.begin(), sm.end())));
+        }
+        else if (filename.containsIgnoreCase("summing_dna"))
+        {
+            addStats("separateRms", collect("separateRms"));
+            addStats("summedRms", collect("summedRms"));
+            addStats("interactionResidualRms", collect("interactionResidualRms"));
+            addStats("interactionResidualDbRelative", collect("interactionResidualDbRelative"));
+            addStats("summedCrestDb", collect("summedCrestDb"));
+            addStats("nonAdditivityPercent", collect("nonAdditivityPercent"));
+            const auto residual = collect("interactionResidualDbRelative");
+            if (!residual.empty()) add("strongestSummingInteractionDb", *std::max_element(residual.begin(), residual.end()));
+        }
+        else if (filename.containsIgnoreCase("boundary_dna"))
+        {
+            const int cc=index("componentClass"), gc=index("inputGainDb"), fc=index("frequencyHz");
+            const auto products=collect("outputDbRelativeToInputRms");
+            addStats("dcOffset",collect("dcOffset"));addStats("transferDb",collect("transferDb"));addStats("phaseDegrees",collect("phaseDegrees"));addStats("boundaryProductsDb",products);
+            for(int cls=0;cls<=8;++cls)addStats("componentClass"+juce::String(cls)+"Db",collect("outputDbRelativeToInputRms",[&](const std::vector<double>& r){return std::llround(value(r,cc))==cls;}));
+            if(!products.empty()){add("worstBoundaryProductDb",*std::max_element(products.begin(),products.end()));add("boundaryProductDensityAboveMinus80Db",static_cast<double>(std::count_if(products.begin(),products.end(),[](double v){return v>-80.0;}))/products.size());}
+            std::vector<std::pair<double,double>> byGain;
+            for(const auto* row:rows){const double g=value(*row,gc),v=value(*row,index("outputDbRelativeToInputRms"));if(std::isfinite(g)&&std::isfinite(v))byGain.push_back({g,v});}
+            std::sort(byGain.begin(),byGain.end());double onset=std::numeric_limits<double>::quiet_NaN();for(const auto& p:byGain)if(p.second>-80.0){onset=p.first;break;}add("firstInstabilityInputDb",onset);
+            const auto freqs=collect("frequencyHz");if(!freqs.empty()){add("lowestBoundaryFrequencyHz",*std::min_element(freqs.begin(),freqs.end()));add("highestBoundaryFrequencyHz",*std::max_element(freqs.begin(),freqs.end()));}
+        }
+        return juce::var(derived);
+    }
+
+    juce::var summariseDatasetForEvidence(const juce::String& filename, const MeasurementDataset& dataset, const Config& config)
+    {
+        auto* result = new juce::DynamicObject();
+        result->setProperty("source", filename);
+        result->setProperty("analyser", juce::String(dataset.analyserName));
+        result->setProperty("rowCount", static_cast<juce::int64>(dataset.rows.size()));
+
+        juce::Array<juce::var> columnNames;
+        for (const auto& column : dataset.columns)
+            columnNames.add(juce::String(column));
+        result->setProperty("columns", columnNames);
+
+        // Compact Evidence v2: dataset-wide bookkeeping lives in the raw package.
+        // The compact pack keeps settings plus derived measurements only.
+
+        const int runIdColumn = findColumn(dataset, "runId");
+        if (runIdColumn >= 0)
+        {
+            std::map<int, std::vector<const std::vector<double>*>> groupedRows;
+            for (const auto& row : dataset.rows)
+                if (static_cast<std::size_t>(runIdColumn) < row.size())
+                    groupedRows[static_cast<int>(std::llround(row[static_cast<std::size_t>(runIdColumn)]))].push_back(&row);
+
+            juce::Array<juce::var> runs;
+            for (const auto& group : groupedRows)
+            {
+                const auto runId = group.first;
+                const auto& rows = group.second;
+                auto* runObject = new juce::DynamicObject();
+                runObject->setProperty("runId", runId);
+                runObject->setProperty("rowCount", static_cast<juce::int64>(rows.size()));
+                auto* constants = new juce::DynamicObject();
+                auto* metrics = new juce::DynamicObject();
+
+                for (std::size_t column = 0; column < dataset.columns.size(); ++column)
+                {
+                    if (static_cast<int>(column) == runIdColumn)
+                        continue;
+                    double minimum = std::numeric_limits<double>::infinity();
+                    double maximum = -std::numeric_limits<double>::infinity();
+                    double sum = 0.0;
+                    std::int64_t count = 0;
+                    for (const auto* row : rows)
+                    {
+                        if (column >= row->size() || !std::isfinite((*row)[column]))
+                            continue;
+                        minimum = std::min(minimum, (*row)[column]);
+                        maximum = std::max(maximum, (*row)[column]);
+                        sum += (*row)[column];
+                        ++count;
+                    }
+                    if (count == 0)
+                        continue;
+                    const auto name = juce::String(dataset.columns[column]);
+                    if (isEvidenceSettingColumn(name, config))
+                    {
+                        if (std::abs(maximum - minimum) < 1.0e-12)
+                            constants->setProperty(name, minimum);
+                        else
+                            constants->setProperty(name, makeNumericStats(minimum, maximum, sum / static_cast<double>(count), count));
+                    }
+                    else
+                    {
+                        // Raw analyser columns are intentionally omitted from the compact pack.
+                        // deriveRunEvidenceMetrics() below retains the musically/engineering-useful
+                        // fingerprint while Export Raw Data remains lossless.
+                    }
+                }
+
+                metrics->setProperty("derived", deriveRunEvidenceMetrics(filename, dataset, rows));
+                runObject->setProperty("settings", juce::var(constants));
+                runObject->setProperty("metrics", juce::var(metrics));
+                runs.add(juce::var(runObject));
+            }
+            result->setProperty("runs", runs);
+        }
+        return juce::var(result);
+    }
+
+    juce::String compactFamilyForSource(const juce::String& source)
+    {
+        if (source.containsIgnoreCase("rms_peak_sine")) return "levelDynamicsSine";
+        if (source.containsIgnoreCase("rms_peak_noise")) return "levelDynamicsNoise";
+        if (source.containsIgnoreCase("rms_peak_sweep")) return "levelDynamicsSweep";
+        if (source.containsIgnoreCase("grid_thd")) return "harmonics";
+        if (source.containsIgnoreCase("harmonic_fingerprint")) return "harmonicFrequencyProfile";
+        if (source.containsIgnoreCase("transfer_curves_sine")) return "transferSine";
+        if (source.containsIgnoreCase("transfer_curves_noise")) return "transferNoise";
+        if (source.containsIgnoreCase("transfer_curves_sweep")) return "transferSweep";
+        if (source.containsIgnoreCase("linear_response_sine")) return "frequencyResponseSine";
+        if (source.containsIgnoreCase("linear_response_noise")) return "frequencyResponseNoise";
+        if (source.containsIgnoreCase("linear_response_sweep")) return "frequencyResponseSweep";
+        if (source.containsIgnoreCase("residual_dna")) return "residual";
+        if (source.containsIgnoreCase("interaction_dna")) return "interaction";
+        if (source.containsIgnoreCase("timing_dna")) return "timingPhase";
+        if (source.containsIgnoreCase("alias_stress")) return "alias";
+        if (source.containsIgnoreCase("stereo_dna")) return "stereo";
+        if (source.containsIgnoreCase("summing_dna")) return "summing";
+        if (source.containsIgnoreCase("boundary_dna")) return "boundaries";
+        return source.upToLastOccurrenceOf(".csv", false, true);
+    }
+
+    juce::var buildOperatingPointDNA(const juce::Array<juce::var>& evidence)
+    {
+        std::map<int, juce::DynamicObject*> points;
+        for (const auto& evidenceVar : evidence)
+        {
+            auto* evidenceObject = evidenceVar.getDynamicObject();
+            if (evidenceObject == nullptr) continue;
+            const auto source = evidenceObject->getProperty("source").toString();
+            const auto family = compactFamilyForSource(source);
+            auto* runs = evidenceObject->getProperty("runs").getArray();
+            if (runs == nullptr) continue;
+
+            for (const auto& runVar : *runs)
+            {
+                auto* run = runVar.getDynamicObject();
+                if (run == nullptr) continue;
+                const int runId = static_cast<int>(run->getProperty("runId"));
+                auto it = points.find(runId);
+                if (it == points.end())
+                {
+                    auto* point = new juce::DynamicObject();
+                    point->setProperty("runId", runId);
+                    point->setProperty("settings", run->getProperty("settings"));
+                    point->setProperty("measurements", juce::var(new juce::DynamicObject()));
+                    points.emplace(runId, point);
+                    it = points.find(runId);
+                }
+                auto* measurements = it->second->getProperty("measurements").getDynamicObject();
+                auto* metrics = run->getProperty("metrics").getDynamicObject();
+                if (measurements == nullptr || metrics == nullptr) continue;
+                const auto derived = metrics->getProperty("derived");
+                if (derived.getDynamicObject() != nullptr && derived.getDynamicObject()->getProperties().size() > 0)
+                    measurements->setProperty(family, derived);
+            }
+        }
+
+        juce::Array<juce::var> array;
+        for (const auto& item : points) array.add(juce::var(item.second));
+        return juce::var(array);
+    }
+
+    juce::var buildCompactThresholds(const juce::var& operatingPointVar)
+    {
+        auto* result = new juce::DynamicObject();
+        auto* extrema = new juce::DynamicObject();
+        double worstAlias = -300.0, highestClean = 0.0, firstAlias = std::numeric_limits<double>::infinity();
+        double maxCrestReduction = 0.0, maxResponseDeviation = 0.0, maxPhase = 0.0;
+        double maxResidual = -300.0, maxInteraction = -300.0;
+        bool haveAlias=false, haveResidual=false, haveInteraction=false;
+
+        auto statMean = [](const juce::var& v) -> double
+        {
+            if (v.isDouble() || v.isInt() || v.isInt64()) return static_cast<double>(v);
+            if (auto* o=v.getDynamicObject())
+            {
+                const auto m=o->getProperty("mean");
+                if (m.isDouble() || m.isInt() || m.isInt64()) return static_cast<double>(m);
+            }
+            return std::numeric_limits<double>::quiet_NaN();
+        };
+        auto number = [](juce::DynamicObject* o, const char* key) -> double
+        {
+            if (o==nullptr) return std::numeric_limits<double>::quiet_NaN();
+            const auto v=o->getProperty(key);
+            return (v.isDouble()||v.isInt()||v.isInt64()) ? static_cast<double>(v) : std::numeric_limits<double>::quiet_NaN();
+        };
+
+        if (auto* points=operatingPointVar.getArray())
+        {
+            for (const auto& pointVar:*points)
+            {
+                auto* point=pointVar.getDynamicObject(); if(point==nullptr)continue;
+                auto* measurements=point->getProperty("measurements").getDynamicObject(); if(measurements==nullptr)continue;
+                if(auto* a=measurements->getProperty("alias").getDynamicObject())
+                {
+                    const double w=number(a,"worstAliasDb"); if(std::isfinite(w)){worstAlias=std::max(worstAlias,w);haveAlias=true;}
+                    const double h=number(a,"highestCleanFundamentalHzAtMinus90Db"); if(std::isfinite(h))highestClean=std::max(highestClean,h);
+                    const double f=number(a,"firstAliasFundamentalHzAboveMinus90Db"); if(std::isfinite(f))firstAlias=std::min(firstAlias,f);
+                }
+                if(auto* d=measurements->getProperty("levelDynamicsSine").getDynamicObject())
+                {
+                    const double c=statMean(d->getProperty("crestFactorChangeDb")); if(std::isfinite(c))maxCrestReduction=std::max(maxCrestReduction,-c);
+                }
+                for(const char* fam:{"frequencyResponseSine","frequencyResponseNoise","frequencyResponseSweep"})
+                    if(auto* f=measurements->getProperty(fam).getDynamicObject())
+                    {
+                        const double r=number(f,"responseRippleDb"); if(std::isfinite(r))maxResponseDeviation=std::max(maxResponseDeviation,std::abs(r));
+                    }
+                if(auto* t=measurements->getProperty("timingPhase").getDynamicObject())
+                { const double p=number(t,"maximumAbsolutePhaseRotationDegrees"); if(std::isfinite(p))maxPhase=std::max(maxPhase,p); }
+                if(auto* r=measurements->getProperty("residual").getDynamicObject())
+                { const double v=statMean(r->getProperty("overallResidualDb")); if(std::isfinite(v)){maxResidual=std::max(maxResidual,v);haveResidual=true;} }
+                if(auto* i=measurements->getProperty("interaction").getDynamicObject())
+                { const double v=number(i,"worstProductDb"); if(std::isfinite(v)){maxInteraction=std::max(maxInteraction,v);haveInteraction=true;} }
+            }
+        }
+        if(haveAlias)extrema->setProperty("worstAliasDb",worstAlias);
+        if(highestClean>0)extrema->setProperty("highestCleanFundamentalHzAtMinus90Db",highestClean);
+        if(std::isfinite(firstAlias))extrema->setProperty("firstAliasFundamentalHzAboveMinus90Db",firstAlias);
+        extrema->setProperty("maximumCrestReductionDb",maxCrestReduction);
+        extrema->setProperty("maximumFrequencyResponseRippleDb",maxResponseDeviation);
+        extrema->setProperty("maximumAbsolutePhaseRotationDegrees",maxPhase);
+        if(haveResidual)extrema->setProperty("maximumMeanResidualDbRelativeToOutput",maxResidual);
+        if(haveInteraction)extrema->setProperty("worstInteractionProductDbRelativeToInput",maxInteraction);
+        result->setProperty("extrema",juce::var(extrema));
+        result->setProperty("note","Thresholds are measurement-derived extrema. Operating-region labels are intentionally deferred until the policy is validated across a larger plugin corpus.");
+        return juce::var(result);
+    }
+
+    juce::Array<juce::var> generatedBucketValues(const ParameterBucketConfig& bucket)
+    {
+        juce::Array<juce::var> values;
+        BucketSpec spec;
+        spec.paramName = bucket.paramName;
+        spec.strategy = BucketSpec::strategyFromString(bucket.strategy);
+        spec.min = bucket.min;
+        spec.max = bucket.max;
+        spec.numBuckets = bucket.numBuckets;
+        spec.values = bucket.values;
+        auto generated = spec.generateValues();
+        if (bucket.includePluginDefault && !bucket.strategy.equalsIgnoreCase("Enumerated"))
+        {
+            const auto defaultValue = juce::jlimit(0.0f, 1.0f, bucket.pluginDefaultValue);
+            const auto alreadyIncluded = std::any_of(generated.begin(), generated.end(), [defaultValue](float value)
+            {
+                return std::abs(value - defaultValue) < 1.0e-5f;
+            });
+            if (!alreadyIncluded)
+                generated.push_back(defaultValue);
+            std::sort(generated.begin(), generated.end());
+            generated.erase(std::unique(generated.begin(), generated.end(), [](float a, float b)
+            {
+                return std::abs(a - b) < 1.0e-5f;
+            }), generated.end());
+        }
+        for (const auto value : generated)
+            values.add(value);
+        return values;
+    }
+
 MainComponent::MainComponent()
     : pluginPathLabel("Plugin Path:", "Plugin Path:"), pluginInfoLabel("", "No plugin loaded"),
-      parametersLabel("Parameters:", "Parameters:"), outputPathLabel("Output Path:", "Output Path:"),
+      serialPluginLabel("Serial Plugin (optional):", "Serial Plugin (optional):"), serialPluginInfoLabel("", "No serial plugin loaded"),
+      parametersLabel("", ""), outputPathLabel("Output Path:", "Output Path:"),
       progressLabel("", "Ready"), progressBar(progress) {
+    buildVersionLabel.setText({}, juce::dontSendNotification);
+    buildVersionLabel.setFont(juce::Font(juce::FontOptions(18.0f, juce::Font::bold)));
+    buildVersionLabel.setVisible(false);
+    buildVersionLabel.setJustificationType(juce::Justification::centred);
+    addAndMakeVisible(buildVersionLabel);
+
     // Plugin path section
     addAndMakeVisible(pluginPathLabel);
     // Default plugin path - set to dev plugin in debug builds
@@ -2180,10 +3078,42 @@ MainComponent::MainComponent()
     loadPluginButton.addListener(this);
     addAndMakeVisible(loadPluginButton);
 
+    openPluginButton.setButtonText("Open");
+    openPluginButton.addListener(this);
+    openPluginButton.setEnabled(false);
+    addAndMakeVisible(openPluginButton);
+
     addAndMakeVisible(pluginInfoLabel);
 
-    // Parameter list
+    addAndMakeVisible(serialPluginLabel);
+    addAndMakeVisible(serialPluginPathEditor);
+    serialBrowseButton.setButtonText("Browse..."); serialBrowseButton.addListener(this); addAndMakeVisible(serialBrowseButton);
+    serialLoadButton.setButtonText("Load Serial"); serialLoadButton.addListener(this); addAndMakeVisible(serialLoadButton);
+    serialOpenButton.setButtonText("Open"); serialOpenButton.addListener(this); serialOpenButton.setEnabled(false); addAndMakeVisible(serialOpenButton);
+    addAndMakeVisible(serialPluginInfoLabel);
+
+    // Parameter scan panel
+    parameterScanGroup.setText("Parameter Scan");
+    addAndMakeVisible(parameterScanGroup);
+
+    parametersLabel.setText("Choose parameters to scan", juce::dontSendNotification);
+    parametersLabel.setFont(juce::Font(juce::FontOptions(14.0f, juce::Font::bold)));
     addAndMakeVisible(parametersLabel);
+
+    parameterTargetLabel.setText("Parameter target", juce::dontSendNotification);
+    addAndMakeVisible(parameterTargetLabel);
+    plugin1ParameterButton.setButtonText("Plugin 1");
+    plugin1ParameterButton.addListener(this);
+    plugin1ParameterButton.setColour(juce::TextButton::buttonColourId, juce::Colours::darkcyan);
+    addAndMakeVisible(plugin1ParameterButton);
+    plugin2ParameterButton.setButtonText("Plugin 2");
+    plugin2ParameterButton.addListener(this);
+    addAndMakeVisible(plugin2ParameterButton);
+
+    parameterSearchEditor.setTextToShowWhenEmpty("Search parameters...", juce::Colours::grey);
+    parameterSearchEditor.addListener(this);
+    addAndMakeVisible(parameterSearchEditor);
+
     parameterListBox.setModel(this);
     parameterListBox.setRowSelectedOnMouseDown(false); // Disable row selection - we handle clicks ourselves
     parameterListBox.setMultipleSelectionEnabled(false);
@@ -2196,6 +3126,11 @@ MainComponent::MainComponent()
     deselectAllButton.setButtonText("Deselect All");
     deselectAllButton.addListener(this);
     addAndMakeVisible(deselectAllButton);
+
+    noParameterScanButton.setButtonText("No parameter scan");
+    noParameterScanButton.addListener(this);
+    noParameterScanButton.setTooltip("Run every enabled analyser through the plugin exactly as it is currently configured, without moving any plugin parameter.");
+    addAndMakeVisible(noParameterScanButton);
 
     // Parameter config viewport
     parameterConfigViewport.setViewedComponent(&parameterConfigContainer, false);
@@ -2218,10 +3153,16 @@ MainComponent::MainComponent()
     browseOutputButton.addListener(this);
     addAndMakeVisible(browseOutputButton);
 
-    exportDataButton.setButtonText("Export Data");
+    exportDataButton.setButtonText("Export Raw Data");
+    exportDataButton.setTooltip("Create a lossless full-evidence folder containing every analyser CSV plus the compact evidence JSON.");
     exportDataButton.addListener(this);
     exportDataButton.setEnabled(false);
     addAndMakeVisible(exportDataButton);
+
+    exportEvidenceButton.setButtonText("Export Evidence");
+    exportEvidenceButton.addListener(this);
+    exportEvidenceButton.setEnabled(false);
+    addAndMakeVisible(exportEvidenceButton);
 
     // Human-readable result summary
     resultsSummaryGroup.setText("Signal Summary");
@@ -2258,7 +3199,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(progressBar);
     progressBar.setPercentageDisplay(false);
 
-    setSize(1200, 1200);
+    setSize(1240, 1540);
 }
 
 MainComponent::~MainComponent() {}
@@ -2270,8 +3211,11 @@ void MainComponent::paint(juce::Graphics& g) {
 void MainComponent::resized() {
     auto bounds = getLocalBounds().reduced(10);
 
+    buildVersionLabel.setBounds(bounds.removeFromTop(32));
+    bounds.removeFromTop(4);
+
     // Plugin path section (top)
-    auto pluginSection = bounds.removeFromTop(80);
+    auto pluginSection = bounds.removeFromTop(150);
     pluginPathLabel.setBounds(pluginSection.removeFromTop(25));
     auto pluginRow = pluginSection.removeFromTop(30);
     pluginPathEditor.setBounds(pluginRow.removeFromLeft(600));
@@ -2279,25 +3223,53 @@ void MainComponent::resized() {
     browseButton.setBounds(pluginRow.removeFromLeft(100));
     pluginRow.removeFromLeft(10);
     loadPluginButton.setBounds(pluginRow.removeFromLeft(120));
-    pluginInfoLabel.setBounds(pluginSection);
+    pluginRow.removeFromLeft(10);
+    openPluginButton.setBounds(pluginRow.removeFromLeft(80));
+    pluginInfoLabel.setBounds(pluginSection.removeFromTop(25));
+    serialPluginLabel.setBounds(pluginSection.removeFromTop(25));
+    auto serialRow = pluginSection.removeFromTop(30);
+    serialPluginPathEditor.setBounds(serialRow.removeFromLeft(600)); serialRow.removeFromLeft(10);
+    serialBrowseButton.setBounds(serialRow.removeFromLeft(100)); serialRow.removeFromLeft(10);
+    serialLoadButton.setBounds(serialRow.removeFromLeft(120)); serialRow.removeFromLeft(10);
+    serialOpenButton.setBounds(serialRow.removeFromLeft(80));
+    serialPluginInfoLabel.setBounds(pluginSection);
     bounds.removeFromTop(10);
 
-    // Main content area (side by side)
-    auto contentArea = bounds.removeFromTop(410);
+    // Main laboratory panels (side by side, equal height)
+    auto contentArea = bounds.removeFromTop(620);
+    const int panelGap = 12;
+    const int leftWidth = (contentArea.getWidth() - panelGap) / 2;
 
-    // Left: Parameter list and config
-    auto leftPanel = contentArea.removeFromLeft(500);
-    parametersLabel.setBounds(leftPanel.removeFromTop(25));
-    auto buttonRow = leftPanel.removeFromTop(30);
-    selectAllButton.setBounds(buttonRow.removeFromLeft(100));
-    buttonRow.removeFromLeft(10);
-    deselectAllButton.setBounds(buttonRow.removeFromLeft(100));
-    parameterListBox.setBounds(leftPanel.removeFromTop(150));
-    leftPanel.removeFromTop(10);
+    auto leftPanelBounds = contentArea.removeFromLeft(leftWidth);
+    contentArea.removeFromLeft(panelGap);
+    auto rightPanelBounds = contentArea;
+
+    parameterScanGroup.setBounds(leftPanelBounds);
+    auto leftPanel = leftPanelBounds.reduced(12, 28);
+
+    auto targetRow = leftPanel.removeFromTop(28);
+    parameterTargetLabel.setBounds(targetRow.removeFromLeft(110));
+    plugin1ParameterButton.setBounds(targetRow.removeFromLeft(86));
+    targetRow.removeFromLeft(6);
+    plugin2ParameterButton.setBounds(targetRow.removeFromLeft(86));
+    leftPanel.removeFromTop(5);
+    noParameterScanButton.setBounds(leftPanel.removeFromTop(30));
+    leftPanel.removeFromTop(6);
+    parametersLabel.setBounds(leftPanel.removeFromTop(24));
+    parameterSearchEditor.setBounds(leftPanel.removeFromTop(30));
+    leftPanel.removeFromTop(6);
+
+    auto buttonRow = leftPanel.removeFromTop(28);
+    selectAllButton.setBounds(buttonRow.removeFromLeft(90));
+    buttonRow.removeFromLeft(8);
+    deselectAllButton.setBounds(buttonRow.removeFromLeft(90));
+    leftPanel.removeFromTop(6);
+
+    parameterListBox.setBounds(leftPanel.removeFromTop(170));
+    leftPanel.removeFromTop(8);
     parameterConfigViewport.setBounds(leftPanel);
 
-    // Right: Measurement config
-    measurementConfig->setBounds(contentArea);
+    measurementConfig->setBounds(rightPanelBounds);
 
     bounds.removeFromTop(10);
 
@@ -2311,7 +3283,9 @@ void MainComponent::resized() {
     outputRow.removeFromLeft(10);
     runMeasurementButton.setBounds(outputRow.removeFromLeft(150));
     outputRow.removeFromLeft(10);
-    exportDataButton.setBounds(outputRow.removeFromLeft(120));
+    exportDataButton.setBounds(outputRow.removeFromLeft(135));
+    outputRow.removeFromLeft(10);
+    exportEvidenceButton.setBounds(outputRow.removeFromLeft(145));
 
     bounds.removeFromTop(10);
 
@@ -2370,13 +3344,33 @@ void MainComponent::resized() {
 }
 
 void MainComponent::buttonClicked(juce::Button* button) {
+    if (button == &plugin1ParameterButton) {
+        saveCurrentParameterPanelState();
+        loadParameterPanelState(false);
+        return;
+    }
+    if (button == &plugin2ParameterButton) {
+        if (serialPluginInstance == nullptr) {
+            showError("Load Plugin 2 before selecting its parameters.");
+            return;
+        }
+        saveCurrentParameterPanelState();
+        loadParameterPanelState(true);
+        return;
+    }
     if (button == &browseButton) {
-        auto chooser = std::make_shared<juce::FileChooser>("Select VST3 Plugin", juce::File(), "*.vst3");
+        auto chooser = std::make_shared<juce::FileChooser>("Select Plugin (VST3 or Audio Unit)", juce::File(), "*.vst3;*.component");
         auto chooserFlags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
         chooser->launchAsync(chooserFlags, [this, chooser](const juce::FileChooser& fc) {
             if (fc.getResults().size() > 0) {
                 pluginPathEditor.setText(fc.getResult().getFullPathName(), juce::dontSendNotification);
             }
+        });
+    } else if (button == &serialBrowseButton) {
+        auto chooser = std::make_shared<juce::FileChooser>("Select second Plugin (VST3 or Audio Unit)", juce::File(), "*.vst3;*.component");
+        auto chooserFlags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+        chooser->launchAsync(chooserFlags, [this, chooser](const juce::FileChooser& fc) {
+            if (fc.getResults().size() > 0) serialPluginPathEditor.setText(fc.getResult().getFullPathName(), juce::dontSendNotification);
         });
     } else if (button == &browseOutputButton) {
         auto chooser =
@@ -2389,6 +3383,12 @@ void MainComponent::buttonClicked(juce::Button* button) {
         });
     } else if (button == &loadPluginButton) {
         loadPlugin();
+    } else if (button == &openPluginButton) {
+        openPluginEditor(pluginInstance.get(), pluginEditorWindow, pluginInstance != nullptr ? pluginInstance->getName() : "Plugin");
+    } else if (button == &serialLoadButton) {
+        loadSerialPlugin();
+    } else if (button == &serialOpenButton) {
+        openPluginEditor(serialPluginInstance.get(), serialPluginEditorWindow, serialPluginInstance != nullptr ? serialPluginInstance->getName() : "Serial Plugin");
     } else if (button == &selectAllButton) {
         selectedParameters.resize(availableParameters.size(), true);
         std::fill(selectedParameters.begin(), selectedParameters.end(), true);
@@ -2413,6 +3413,21 @@ void MainComponent::buttonClicked(juce::Button* button) {
         }
         parameterListBox.repaint(); // Also repaint the whole component
         updateParameterList();
+    } else if (button == &noParameterScanButton) {
+        const bool baseline = noParameterScanButton.getToggleState();
+        if (baseline)
+        {
+            std::fill(selectedParameters.begin(), selectedParameters.end(), false);
+            parameterListBox.updateContent();
+            parameterListBox.repaint();
+            updateParameterList();
+        }
+        parameterListBox.setEnabled(!baseline);
+        selectAllButton.setEnabled(!baseline);
+        deselectAllButton.setEnabled(!baseline);
+        parameterConfigViewport.setEnabled(!baseline);
+        progressLabel.setText(baseline ? "Baseline mode: current plugin settings will be tested" : "Parameter scan enabled",
+                              juce::dontSendNotification);
     } else if (button == &runMeasurementButton) {
         runMeasurement();
     } else if (button == &copySummaryButton) {
@@ -2420,20 +3435,32 @@ void MainComponent::buttonClicked(juce::Button* button) {
         progressLabel.setText("Summary copied to clipboard", juce::dontSendNotification);
     } else if (button == &exportDataButton) {
         exportMeasurementData();
+    } else if (button == &exportEvidenceButton) {
+        exportEvidencePack();
     }
 }
 
 void MainComponent::textEditorTextChanged(juce::TextEditor& editor) {
-    // Handle text changes if needed
+    if (&editor == &parameterSearchEditor)
+    {
+        filteredParameterIndices.clear();
+        const auto query = parameterSearchEditor.getText().trim().toLowerCase();
+        for (int i = 0; i < static_cast<int>(availableParameters.size()); ++i)
+            if (query.isEmpty() || availableParameters[static_cast<std::size_t>(i)].toLowerCase().contains(query))
+                filteredParameterIndices.push_back(i);
+        parameterListBox.updateContent();
+        parameterListBox.repaint();
+    }
 }
 
 int MainComponent::getNumRows() {
-    return (int)availableParameters.size();
+    return (int)filteredParameterIndices.size();
 }
 
 void MainComponent::paintListBoxItem(int rowNumber, juce::Graphics& g, int width, int height, bool rowIsSelected) {
-    if (rowNumber < 0 || rowNumber >= (int)availableParameters.size())
+    if (rowNumber < 0 || rowNumber >= (int)filteredParameterIndices.size())
         return;
+    const int parameterIndex = filteredParameterIndices[static_cast<std::size_t>(rowNumber)];
 
     // Background - use subtle alternating colors, ignore rowIsSelected since we disabled selection
     g.fillAll(rowNumber % 2 == 0 ? juce::Colours::white : juce::Colours::lightgrey.withAlpha(0.3f));
@@ -2444,7 +3471,7 @@ void MainComponent::paintListBoxItem(int rowNumber, juce::Graphics& g, int width
     const int checkboxY = (height - checkboxSize) / 2;
     juce::Rectangle<float> checkboxBounds((float)checkboxX, (float)checkboxY, (float)checkboxSize, (float)checkboxSize);
 
-    bool isChecked = rowNumber < (int)selectedParameters.size() && selectedParameters[rowNumber];
+    bool isChecked = parameterIndex < (int)selectedParameters.size() && selectedParameters[static_cast<std::size_t>(parameterIndex)];
 
     // Draw checkbox border
     g.setColour(juce::Colours::darkgrey);
@@ -2474,29 +3501,24 @@ void MainComponent::paintListBoxItem(int rowNumber, juce::Graphics& g, int width
     // Parameter name
     g.setColour(juce::Colours::black);
     g.setFont(14.0f);
-    g.drawText(availableParameters[rowNumber], checkboxX + checkboxSize + 10, 0, width - checkboxX - checkboxSize - 10,
+    g.drawText(availableParameters[static_cast<std::size_t>(parameterIndex)], checkboxX + checkboxSize + 10, 0, width - checkboxX - checkboxSize - 10,
                height, juce::Justification::centredLeft);
 }
 
-void MainComponent::listBoxItemClicked(int row, const juce::MouseEvent& e) {
-    // Ensure selectedParameters is the right size
-    if (selectedParameters.size() != availableParameters.size()) {
+void MainComponent::listBoxItemClicked(int row, const juce::MouseEvent&) {
+    if (selectedParameters.size() != availableParameters.size())
         selectedParameters.resize(availableParameters.size(), false);
-    }
 
-    // Only toggle if clicking within the checkbox area or the row itself
-    // This prevents accidental toggles when clicking elsewhere
-    const int checkboxArea = 30; // Approximate checkbox area width
+    if (row < 0 || row >= static_cast<int>(filteredParameterIndices.size()))
+        return;
 
-    // Toggle if clicking in the left part of the row (where checkbox is) or anywhere on the row
-    if (row >= 0 && row < (int)selectedParameters.size() && row < (int)availableParameters.size()) {
-        // Always toggle on row click - the checkbox visual will update
-        selectedParameters[row] = !selectedParameters[row];
-        parameterListBox.updateContent();
-        parameterListBox.repaintRow(row); // Repaint the specific row that changed
-        parameterListBox.repaint();       // Also repaint the whole component
-        updateParameterList();
-    }
+    const int parameterIndex = filteredParameterIndices[static_cast<std::size_t>(row)];
+    if (parameterIndex < 0 || parameterIndex >= static_cast<int>(selectedParameters.size()))
+        return;
+
+    selectedParameters[static_cast<std::size_t>(parameterIndex)] = !selectedParameters[static_cast<std::size_t>(parameterIndex)];
+    parameterListBox.repaintRow(row);
+    updateParameterList();
 }
 
 void MainComponent::loadPlugin() {
@@ -2513,6 +3535,7 @@ void MainComponent::loadPlugin() {
         return;
     }
 
+    pluginEditorWindow.reset();
     progressLabel.setText("Loading plugin...", juce::dontSendNotification);
 
     // Get sample rate and block size from measurement config
@@ -2528,9 +3551,42 @@ void MainComponent::loadPlugin() {
     }
 
     pluginInfoLabel.setText("Loaded: " + pluginInstance->getName(), juce::dontSendNotification);
+    openPluginButton.setEnabled(pluginInstance->hasEditor());
     scanPluginParameters();
     runMeasurementButton.setEnabled(true);
     progressLabel.setText("Plugin loaded successfully", juce::dontSendNotification);
+}
+
+
+void MainComponent::openPluginEditor(juce::AudioPluginInstance* plugin, std::unique_ptr<juce::DocumentWindow>& window, const juce::String& title)
+{
+    if (plugin == nullptr || !plugin->hasEditor()) return;
+    if (window != nullptr) { window->setVisible(true); window->toFront(true); return; }
+    auto* editor = plugin->createEditorIfNeeded();
+    if (editor == nullptr) return;
+    class EditorWindow final : public juce::DocumentWindow
+    {
+    public:
+        EditorWindow(const juce::String& n, juce::Component* c) : juce::DocumentWindow(n, juce::Colours::darkgrey, juce::DocumentWindow::closeButton)
+        { setUsingNativeTitleBar(true); setContentNonOwned(c, true); centreWithSize(c->getWidth(), c->getHeight()); setResizable(true, true); }
+        void closeButtonPressed() override { setVisible(false); }
+    };
+    window = std::make_unique<EditorWindow>(title, editor);
+    window->setVisible(true);
+}
+
+void MainComponent::loadSerialPlugin()
+{
+    const auto path = serialPluginPathEditor.getText().trim();
+    if (path.isEmpty()) { serialPluginInstance.reset(); serialOpenButton.setEnabled(false); serialPluginInfoLabel.setText("Serial stage disabled", juce::dontSendNotification); return; }
+    serialPluginEditorWindow.reset();
+    Config tempConfig; measurementConfig->fillConfig(tempConfig);
+    juce::String error;
+    serialPluginInstance = loadPluginInstance(juce::File(path), tempConfig.sampleRate, tempConfig.blockSize, error);
+    if (serialPluginInstance == nullptr) { showError(error); return; }
+    serialPluginInfoLabel.setText("Serial stage: " + serialPluginInstance->getName(), juce::dontSendNotification);
+    serialOpenButton.setEnabled(serialPluginInstance->hasEditor());
+    scanSerialPluginParameters();
 }
 
 void MainComponent::scanPluginParameters() {
@@ -2547,8 +3603,77 @@ void MainComponent::scanPluginParameters() {
     }
 
     std::sort(availableParameters.begin(), availableParameters.end());
+
+    // Rebuild the visible row map after every plugin scan. Without this,
+    // the ListBox model reports zero rows until the search field changes.
+    filteredParameterIndices.clear();
+    filteredParameterIndices.reserve(availableParameters.size());
+    for (int i = 0; i < static_cast<int>(availableParameters.size()); ++i)
+        filteredParameterIndices.push_back(i);
+
+    primaryAvailableParameters = availableParameters;
+    primarySelectedParameters = selectedParameters;
+    primaryParameterMap = parameterMap;
+    if (!editingSerialParameters) {
+        parameterListBox.updateContent();
+        parameterListBox.repaint();
+        updateParameterList();
+    }
+}
+
+void MainComponent::scanSerialPluginParameters() {
+    if (serialPluginInstance == nullptr)
+        return;
+    serialParameterMap = buildParameterMap(*serialPluginInstance, true);
+    serialAvailableParameters.clear();
+    serialSelectedParameters.clear();
+    for (const auto& [name, param] : serialParameterMap) {
+        serialAvailableParameters.push_back(name);
+        serialSelectedParameters.push_back(false);
+    }
+    std::sort(serialAvailableParameters.begin(), serialAvailableParameters.end());
+    if (editingSerialParameters)
+        loadParameterPanelState(true);
+}
+
+void MainComponent::saveCurrentParameterPanelState() {
+    std::vector<ParameterBucketConfig> buckets;
+    for (const auto& comp : parameterConfigComponents)
+        buckets.push_back(comp->getConfig());
+    if (editingSerialParameters) {
+        serialAvailableParameters = availableParameters;
+        serialSelectedParameters = selectedParameters;
+        serialParameterMap = parameterMap;
+        serialSavedBuckets = std::move(buckets);
+    } else {
+        primaryAvailableParameters = availableParameters;
+        primarySelectedParameters = selectedParameters;
+        primaryParameterMap = parameterMap;
+        primarySavedBuckets = std::move(buckets);
+    }
+}
+
+void MainComponent::loadParameterPanelState(bool serial) {
+    editingSerialParameters = serial;
+    availableParameters = serial ? serialAvailableParameters : primaryAvailableParameters;
+    selectedParameters = serial ? serialSelectedParameters : primarySelectedParameters;
+    parameterMap = serial ? serialParameterMap : primaryParameterMap;
+    plugin1ParameterButton.setColour(juce::TextButton::buttonColourId, serial ? juce::Colours::darkgrey : juce::Colours::darkcyan);
+    plugin2ParameterButton.setColour(juce::TextButton::buttonColourId, serial ? juce::Colours::darkcyan : juce::Colours::darkgrey);
+    parametersLabel.setText(serial ? "Plugin 2 parameters" : "Plugin 1 parameters", juce::dontSendNotification);
+    filteredParameterIndices.clear();
+    for (int i = 0; i < static_cast<int>(availableParameters.size()); ++i)
+        filteredParameterIndices.push_back(i);
+    parameterSearchEditor.clear();
     parameterListBox.updateContent();
+    parameterListBox.repaint();
+
+    const auto saved = serial ? serialSavedBuckets : primarySavedBuckets;
     updateParameterList();
+    for (auto& comp : parameterConfigComponents)
+        for (const auto& bucket : saved)
+            if (comp->getConfig().paramName == bucket.paramName)
+                comp->setConfig(bucket);
 }
 
 void MainComponent::updateParameterList() {
@@ -2560,11 +3685,14 @@ void MainComponent::updateParameterList() {
     int y = 10;
     for (size_t i = 0; i < availableParameters.size(); ++i) {
         if (i < selectedParameters.size() && selectedParameters[i]) {
-            auto* comp = new ParameterConfigComponent(availableParameters[i]);
-            comp->setBounds(10, y, 480, 150);
+            auto parameterIt = parameterMap.find(availableParameters[i]);
+            auto* comp = new ParameterConfigComponent(availableParameters[i],
+                parameterIt != parameterMap.end() ? parameterIt->second : nullptr);
+            const int componentHeight = comp->getConfig().strategy == "Enumerated" ? 300 : 180;
+            comp->setBounds(10, y, 480, componentHeight);
             parameterConfigContainer.addAndMakeVisible(comp);
             parameterConfigComponents.push_back(std::unique_ptr<ParameterConfigComponent>(comp));
-            y += 160;
+            y += componentHeight + 10;
         }
     }
 
@@ -2578,15 +3706,14 @@ void MainComponent::runMeasurement() {
         return;
     }
 
-    // Count selected parameters
+    saveCurrentParameterPanelState();
+    // Count selected parameters across both serial stages
     int selectedCount = 0;
-    for (bool selected : selectedParameters) {
-        if (selected)
-            selectedCount++;
-    }
+    for (bool selected : primarySelectedParameters) if (selected) selectedCount++;
+    for (bool selected : serialSelectedParameters) if (selected) selectedCount++;
 
-    if (selectedCount == 0) {
-        showError("Please select at least one parameter");
+    if (selectedCount == 0 && !noParameterScanButton.getToggleState()) {
+        showError("Select a parameter, or enable 'No parameter scan' to test the plugin at its current settings.");
         return;
     }
 
@@ -2598,26 +3725,35 @@ void MainComponent::runMeasurement() {
     Config config = buildConfigFromUI();
     config.pluginPath = pluginPathEditor.getText();
 
+    // Capture the exact loaded editor state (important for shell plugins such as
+    // Airwindows Consolidated) and restore it into every fresh measurement instance.
+    auto primaryState = std::make_shared<juce::MemoryBlock>();
+    pluginInstance->getStateInformation(*primaryState);
+    auto serialState = std::make_shared<juce::MemoryBlock>();
+    const auto serialPath = serialPluginPathEditor.getText().trim();
+    if (serialPluginInstance != nullptr)
+        serialPluginInstance->getStateInformation(*serialState);
+
     // Run measurement in background thread
     runMeasurementButton.setEnabled(false);
     exportDataButton.setEnabled(false);
+    exportEvidenceButton.setEnabled(false);
     progressLabel.setText("Running measurement...", juce::dontSendNotification);
     clearResultsSummary();
     {
         std::lock_guard<std::mutex> lock(pendingExportMutex);
         pendingExportDatasets.clear();
+        pendingEvidenceSummary.clear();
+        hasPendingEvidencePack = false;
     }
 
-    std::thread([this, config, outDir]() {
+    std::thread([this, config, outDir, primaryState, serialState, serialPath]() {
         try {
 
             // Build parameter name list
             std::vector<juce::String> paramNames;
-            for (size_t i = 0; i < availableParameters.size(); ++i) {
-                if (i < selectedParameters.size() && selectedParameters[i]) {
-                    paramNames.push_back(availableParameters[i]);
-                }
-            }
+            for (const auto& bucket : config.parameterBuckets)
+                paramNames.push_back(bucket.paramName);
 
             // Build run grid
             juce::MessageManager::callAsync(
@@ -2666,7 +3802,15 @@ void MainComponent::runMeasurement() {
             MeasurementDataset sineThdResult;
             MeasurementDataset sineTransferResult;
             MeasurementDataset sweepLinearResult;
+            MeasurementDataset sweepHarmonicFingerprintResult;
             MeasurementDataset noiseLinearResult;
+            MeasurementDataset interactionResult;
+            MeasurementDataset timingResult;
+            MeasurementDataset residualResult;
+            MeasurementDataset boundaryResult;
+            MeasurementDataset stereoResult;
+            MeasurementDataset summingResult;
+            MeasurementDataset aliasResult;
             std::vector<PendingExportDataset> completedExports;
 
             bool haveSineRaw = false;
@@ -2674,13 +3818,45 @@ void MainComponent::runMeasurement() {
             bool haveSineThd = false;
             bool haveSineTransfer = false;
             bool haveSweepLinear = false;
+            bool haveSweepHarmonicFingerprint = false;
             bool haveNoiseLinear = false;
+            bool haveInteraction = false;
+            bool haveTiming = false;
+            bool haveResidual = false;
+            bool haveBoundary = false;
+            bool haveStereo = false;
+            bool haveSumming = false;
+            bool haveAlias = false;
+
+            const auto analyserSelected = [&config](const juce::String& name)
+            {
+                return std::find_if(config.analyzers.begin(), config.analyzers.end(), [&](const juce::String& item)
+                {
+                    return item.equalsIgnoreCase(name);
+                }) != config.analyzers.end();
+            };
 
             std::vector<juce::String> passSignals;
             if (config.signalType.equalsIgnoreCase("all"))
-                passSignals = { "sine", "sweep", "noise" };
+            {
+                const bool needsSine = analyserSelected("RawCsv") || analyserSelected("RmsPeak")
+                                    || analyserSelected("TransferCurve") || analyserSelected("Thd");
+                const bool needsLinear = analyserSelected("LinearResponse");
+                if (needsSine) passSignals.push_back("sine");
+                if (needsLinear) { passSignals.push_back("sweep"); passSignals.push_back("noise"); }
+                if (analyserSelected("Interaction")) passSignals.push_back("interaction");
+                if (analyserSelected("Timing")) passSignals.push_back("timing");
+                if (analyserSelected("Residual")) passSignals.push_back("residual");
+                if (analyserSelected("Boundary")) passSignals.push_back("boundary");
+                if (analyserSelected("Stereo")) passSignals.push_back("stereo");
+                if (analyserSelected("Summing")) passSignals.push_back("summing");
+                if (analyserSelected("Alias")) passSignals.push_back("alias");
+            }
             else
                 passSignals = { config.signalType };
+
+            if (passSignals.empty())
+                throw std::runtime_error("No analysers are enabled for the selected measurement mode.");
 
             const int totalPassRuns = (int)(runs.size() * passSignals.size());
             int completedPassRuns = 0;
@@ -2690,6 +3866,18 @@ void MainComponent::runMeasurement() {
             {
                 Config passConfig = config;
                 passConfig.signalType = passSignal;
+                if (passSignal.equalsIgnoreCase("timing"))
+                    passConfig.seconds = 0.5; // Impulse, latency and settling need a short capture only.
+                else if (passSignal.equalsIgnoreCase("residual"))
+                    passConfig.seconds = 1.0; // 65k broadband samples are enough for aligned residual evidence.
+                else if (passSignal.equalsIgnoreCase("boundary"))
+                    passConfig.seconds = 10.0; // Includes five seconds of infrasonic and five seconds of ultrasonic stimulus.
+                else if (passSignal.equalsIgnoreCase("stereo"))
+                    passConfig.seconds = 4.0;
+                else if (passSignal.equalsIgnoreCase("summing"))
+                    passConfig.seconds = 3.0;
+                else if (passSignal.equalsIgnoreCase("alias"))
+                    passConfig.seconds = 5.0; // Ten stepped tones, 0.5 seconds per frequency.
 
                 // Only create analysers that are valid for this signal. The user's
                 // checkbox choices are preserved; this simply avoids meaningless
@@ -2697,6 +3885,15 @@ void MainComponent::runMeasurement() {
                 std::vector<juce::String> validAnalyzers;
                 for (const auto& analyzerName : config.analyzers)
                 {
+                    const bool dedicatedPassAnalyzer = analyzerName.equalsIgnoreCase("Interaction")
+                                                    || analyzerName.equalsIgnoreCase("Timing")
+                                                    || analyzerName.equalsIgnoreCase("Residual")
+                                                    || analyzerName.equalsIgnoreCase("Boundary")
+                                                    || analyzerName.equalsIgnoreCase("Stereo")
+                                                    || analyzerName.equalsIgnoreCase("Summing")
+                                                    || analyzerName.equalsIgnoreCase("Alias");
+                    if (dedicatedPassAnalyzer)
+                        continue;
                     if (analyzerName.equalsIgnoreCase("Thd") && !passSignal.equalsIgnoreCase("sine"))
                         continue;
                     if (analyzerName.equalsIgnoreCase("LinearResponse") && passSignal.equalsIgnoreCase("sine"))
@@ -2726,6 +3923,19 @@ void MainComponent::runMeasurement() {
                 if (passPlugin == nullptr)
                     throw std::runtime_error(("Failed to create plugin instance for " + passSignal +
                                               " pass: " + passError).toStdString());
+                if (primaryState != nullptr && primaryState->getSize() > 0)
+                    passPlugin->setStateInformation(primaryState->getData(), static_cast<int>(primaryState->getSize()));
+
+                std::unique_ptr<juce::AudioPluginInstance> passSerialPlugin;
+                if (serialPath.isNotEmpty())
+                {
+                    juce::String serialError;
+                    passSerialPlugin = loadPluginInstance(juce::File(serialPath), passConfig.sampleRate, passConfig.blockSize, serialError);
+                    if (passSerialPlugin == nullptr)
+                        throw std::runtime_error(("Failed to create serial plugin for " + passSignal + ": " + serialError).toStdString());
+                    if (serialState != nullptr && serialState->getSize() > 0)
+                        passSerialPlugin->setStateInformation(serialState->getData(), static_cast<int>(serialState->getSize()));
+                }
 
                 auto passAnalyzers = createAnalyzers(passConfig, juce::File{}, paramNames);
                 const int64_t totalSamples = (int64_t)(passConfig.seconds * passConfig.sampleRate);
@@ -2762,7 +3972,7 @@ void MainComponent::runMeasurement() {
                             progress = overallProgress;
                             progressBar.repaint();
                         });
-                    });
+                    }, passSerialPlugin.get());
 
                 completedPassRuns += (int)runs.size();
 
@@ -2807,6 +4017,8 @@ void MainComponent::runMeasurement() {
                         {
                             sweepLinearResult = linear->getResult();
                             haveSweepLinear = !sweepLinearResult.isEmpty();
+                            sweepHarmonicFingerprintResult = linear->getHarmonicFingerprintResult();
+                            haveSweepHarmonicFingerprint = !sweepHarmonicFingerprintResult.isEmpty();
                         }
                     }
                     else if (passSignal.equalsIgnoreCase("noise"))
@@ -2817,6 +4029,53 @@ void MainComponent::runMeasurement() {
                             haveNoiseLinear = !noiseLinearResult.isEmpty();
                         }
                     }
+                    else if (passSignal.equalsIgnoreCase("interaction"))
+                    {
+                        if (const auto* interaction = dynamic_cast<const InteractionAnalyzer*>(analyzer.get()))
+                        {
+                            interactionResult = interaction->getResult();
+                            haveInteraction = !interactionResult.isEmpty();
+                        }
+                    }
+                    else if (passSignal.equalsIgnoreCase("timing"))
+                    {
+                        if (const auto* timing = dynamic_cast<const TimingAnalyzer*>(analyzer.get()))
+                        {
+                            timingResult = timing->getResult();
+                            haveTiming = !timingResult.isEmpty();
+                        }
+                    }
+                    else if (passSignal.equalsIgnoreCase("residual"))
+                    {
+                        if (const auto* residual = dynamic_cast<const ResidualAnalyzer*>(analyzer.get()))
+                        {
+                            residualResult = residual->getResult();
+                            haveResidual = !residualResult.isEmpty();
+                        }
+                    }
+                    else if (passSignal.equalsIgnoreCase("boundary"))
+                    {
+                        if (const auto* boundary = dynamic_cast<const BoundaryAnalyzer*>(analyzer.get()))
+                        {
+                            boundaryResult = boundary->getResult();
+                            haveBoundary = !boundaryResult.isEmpty();
+                        }
+                    }
+                    else if (passSignal.equalsIgnoreCase("stereo"))
+                    {
+                        if (const auto* stereo = dynamic_cast<const StereoAnalyzer*>(analyzer.get()))
+                        { stereoResult = stereo->getResult(); haveStereo = !stereoResult.isEmpty(); }
+                    }
+                    else if (passSignal.equalsIgnoreCase("summing"))
+                    {
+                        if (const auto* summing = dynamic_cast<const SummingAnalyzer*>(analyzer.get()))
+                        { summingResult = summing->getResult(); haveSumming = !summingResult.isEmpty(); }
+                    }
+                    else if (passSignal.equalsIgnoreCase("alias"))
+                    {
+                        if (const auto* alias = dynamic_cast<const AliasAnalyzer*>(analyzer.get()))
+                        { aliasResult = alias->getResult(); haveAlias = !aliasResult.isEmpty(); }
+                    }
                 }
 
                 // Move every completed in-memory dataset into the pending export
@@ -2824,13 +4083,36 @@ void MainComponent::runMeasurement() {
                 for (auto& analyzer : passAnalyzers)
                 {
                     if (auto* raw = dynamic_cast<RawCsvAnalyzer*>(analyzer.get()))
-                        completedExports.emplace_back(PendingExportDataset{ juce::String("raw_") + passSignal.toLowerCase() + ".csv", raw->takeResult() });
+                        completedExports.emplace_back(PendingExportDataset{ juce::String("grid_raw_") + passSignal.toLowerCase() + ".csv", raw->takeResult() });
                     else if (auto* rms = dynamic_cast<RmsPeakAnalyzer*>(analyzer.get()))
                         completedExports.emplace_back(PendingExportDataset{ juce::String("grid_rms_peak_") + passSignal.toLowerCase() + ".csv", rms->takeResult() });
                     else if (auto* transfer = dynamic_cast<TransferCurveAnalyzer*>(analyzer.get()))
                         completedExports.emplace_back(PendingExportDataset{ juce::String("grid_transfer_curves_") + passSignal.toLowerCase() + ".csv", transfer->takeResult() });
                     else if (auto* linear = dynamic_cast<LinearResponseAnalyzer*>(analyzer.get()))
-                        completedExports.emplace_back(PendingExportDataset{ juce::String("grid_linear_response_") + passSignal.toLowerCase() + ".csv", linear->takeResult() });
+                    {
+                        auto harmonicFingerprint = linear->takeHarmonicFingerprintResult();
+                        if (!harmonicFingerprint.isEmpty())
+                            completedExports.emplace_back(PendingExportDataset{
+                                juce::String("grid_harmonic_fingerprint_") + passSignal.toLowerCase() + ".csv",
+                                std::move(harmonicFingerprint) });
+                        completedExports.emplace_back(PendingExportDataset{
+                            juce::String("grid_linear_response_") + passSignal.toLowerCase() + ".csv",
+                            linear->takeResult() });
+                    }
+                    else if (auto* interaction = dynamic_cast<InteractionAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ "grid_interaction_dna.csv", interaction->takeResult() });
+                    else if (auto* timing = dynamic_cast<TimingAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ "grid_timing_dna.csv", timing->takeResult() });
+                    else if (auto* residual = dynamic_cast<ResidualAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ "grid_residual_dna.csv", residual->takeResult() });
+                    else if (auto* boundary = dynamic_cast<BoundaryAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ "grid_boundary_dna.csv", boundary->takeResult() });
+                    else if (auto* stereo = dynamic_cast<StereoAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ "grid_stereo_dna.csv", stereo->takeResult() });
+                    else if (auto* summing = dynamic_cast<SummingAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ "grid_summing_dna.csv", summing->takeResult() });
+                    else if (auto* alias = dynamic_cast<AliasAnalyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ "grid_alias_stress.csv", alias->takeResult() });
                     else if (auto* thd = dynamic_cast<ThdAnalyzer*>(analyzer.get()))
                         completedExports.emplace_back(PendingExportDataset{ juce::String("grid_thd_") + passSignal.toLowerCase() + ".csv", thd->takeResult() });
                 }
@@ -2918,47 +4200,65 @@ void MainComponent::runMeasurement() {
             identitySummary = makeIdentitySummary(levelSummary, harmonicSummary, toneSummary, behaviourSummary,
                                                   operatingRangeSummary, nonlinearitySummary, waveformSummary,
                                                   temporalSummary);
+            const auto fingerprintEvidence = haveSweepHarmonicFingerprint
+                ? makeHarmonicFingerprintEvidence(sweepHarmonicFingerprintResult)
+                : HarmonicFingerprintEvidence{};
+            const auto producerSummary = makeProducerVocabularySummary(identitySummary, levelSummary,
+                                                                             harmonicSummary, toneSummary,
+                                                                             behaviourSummary, temporalSummary,
+                                                                             fingerprintEvidence);
+
+            const auto compactSummary = juce::String("PluginDNA Summary\n\n")
+                + identitySummary.role + "\n"
+                + producerSummary.character + "\n"
+                + identitySummary.watch + "\n"
+                + levelSummary.level + "\n"
+                + producerSummary.behaviour;
 
             {
                 std::lock_guard<std::mutex> lock(pendingExportMutex);
                 pendingExportDatasets = std::move(completedExports);
+                pendingEvidenceConfig = config;
+                pendingEvidenceSummary = compactSummary;
+                hasPendingEvidencePack = true;
             }
 
-            juce::MessageManager::callAsync([this, identitySummary, levelSummary, harmonicSummary, toneSummary, behaviourSummary, operatingRangeSummary, nonlinearitySummary, waveformSummary, temporalSummary]() {
+            juce::MessageManager::callAsync([this, identitySummary, producerSummary, levelSummary]() {
                 progressLabel.setText(
                     "Measurement complete",
                     juce::dontSendNotification);
                 identityRoleLabel.setText(identitySummary.role, juce::dontSendNotification);
-                identityWhyLabel.setText(identitySummary.why, juce::dontSendNotification);
+                identityWhyLabel.setText(producerSummary.character, juce::dontSendNotification);
                 identityWatchLabel.setText(identitySummary.watch, juce::dontSendNotification);
                 levelSummaryLabel.setText(levelSummary.level, juce::dontSendNotification);
-                peakSummaryLabel.setText(levelSummary.peaks, juce::dontSendNotification);
-                dynamicsSummaryLabel.setText(levelSummary.dynamics, juce::dontSendNotification);
-                harmonicSummaryLabel.setText(harmonicSummary.identity, juce::dontSendNotification);
-                harmonicBalanceLabel.setText(harmonicSummary.balance, juce::dontSendNotification);
-                harmonicGrowthLabel.setText(harmonicSummary.growth, juce::dontSendNotification);
-                toneBassLabel.setText(toneSummary.bass, juce::dontSendNotification);
-                toneMidLabel.setText(toneSummary.midrange, juce::dontSendNotification);
-                toneTrebleLabel.setText(toneSummary.treble, juce::dontSendNotification);
-                toneLargestLabel.setText(toneSummary.largest, juce::dontSendNotification);
-                behaviourSummaryLabel.setText(behaviourSummary.headline, juce::dontSendNotification);
-                behaviourChangesLabel.setText(behaviourSummary.changes, juce::dontSendNotification);
-                operatingRangeLabel.setText(operatingRangeSummary.range, juce::dontSendNotification);
-                characterStartsLabel.setText(operatingRangeSummary.onset, juce::dontSendNotification);
-                underStressLabel.setText(operatingRangeSummary.stress, juce::dontSendNotification);
-                nonlinearityLabel.setText(nonlinearitySummary.type, juce::dontSendNotification);
-                curveBehaviourLabel.setText(nonlinearitySummary.detail, juce::dontSendNotification);
-                waveformShapeLabel.setText(waveformSummary.shape, juce::dontSendNotification);
-                waveformKneeLabel.setText(waveformSummary.detail, juce::dontSendNotification);
-                waveformStyleLabel.setText(waveformSummary.style, juce::dontSendNotification);
-                temporalResponseLabel.setText(temporalSummary.response, juce::dontSendNotification);
-                temporalAttackLabel.setText(temporalSummary.attack, juce::dontSendNotification);
-                temporalAfterLabel.setText(temporalSummary.after, juce::dontSendNotification);
+                peakSummaryLabel.setText({}, juce::dontSendNotification);
+                dynamicsSummaryLabel.setText({}, juce::dontSendNotification);
+                harmonicSummaryLabel.setText(producerSummary.behaviour, juce::dontSendNotification);
+                harmonicBalanceLabel.setText({}, juce::dontSendNotification);
+                harmonicGrowthLabel.setText({}, juce::dontSendNotification);
+                toneBassLabel.setText({}, juce::dontSendNotification);
+                toneMidLabel.setText({}, juce::dontSendNotification);
+                toneTrebleLabel.setText({}, juce::dontSendNotification);
+                toneLargestLabel.setText({}, juce::dontSendNotification);
+                behaviourSummaryLabel.setText({}, juce::dontSendNotification);
+                behaviourChangesLabel.setText({}, juce::dontSendNotification);
+                operatingRangeLabel.setText({}, juce::dontSendNotification);
+                characterStartsLabel.setText({}, juce::dontSendNotification);
+                underStressLabel.setText({}, juce::dontSendNotification);
+                nonlinearityLabel.setText({}, juce::dontSendNotification);
+                curveBehaviourLabel.setText({}, juce::dontSendNotification);
+                waveformShapeLabel.setText({}, juce::dontSendNotification);
+                waveformKneeLabel.setText({}, juce::dontSendNotification);
+                waveformStyleLabel.setText({}, juce::dontSendNotification);
+                temporalResponseLabel.setText({}, juce::dontSendNotification);
+                temporalAttackLabel.setText({}, juce::dontSendNotification);
+                temporalAfterLabel.setText({}, juce::dontSendNotification);
                 progress = 1.0;
                 progressBar.repaint();
                 runMeasurementButton.setEnabled(true);
                 copySummaryButton.setEnabled(true);
                 exportDataButton.setEnabled(true);
+                exportEvidenceButton.setEnabled(true);
             });
         } catch (const std::exception& e) {
             std::cerr << "[Measurement] Exception: " << e.what() << std::endl;
@@ -2978,23 +4278,24 @@ void MainComponent::runMeasurement() {
 
 Config MainComponent::buildConfigFromUI() {
     Config config;
-
-    // Fill measurement config
     measurementConfig->fillConfig(config);
+    saveCurrentParameterPanelState();
 
-    // Add parameter buckets from selected parameters
-    for (size_t i = 0; i < availableParameters.size(); ++i) {
-        if (i < selectedParameters.size() && selectedParameters[i]) {
-            // Find corresponding config component
-            for (const auto& comp : parameterConfigComponents) {
-                if (comp->getConfig().paramName == availableParameters[i]) {
-                    config.parameterBuckets.push_back(comp->getConfig());
-                    break;
-                }
-            }
+    auto appendBuckets = [&config](const std::vector<ParameterBucketConfig>& buckets,
+                                   const std::map<juce::String, juce::AudioProcessorParameter*>& map,
+                                   const juce::String& prefix) {
+        for (auto bucket : buckets) {
+            const auto rawName = bucket.paramName;
+            const auto it = map.find(rawName);
+            if (it != map.end() && it->second != nullptr)
+                bucket.pluginDefaultValue = it->second->getDefaultValue();
+            bucket.includePluginDefault = true;
+            bucket.paramName = prefix + rawName;
+            config.parameterBuckets.push_back(bucket);
         }
-    }
-
+    };
+    appendBuckets(primarySavedBuckets, primaryParameterMap, "P1::");
+    appendBuckets(serialSavedBuckets, serialParameterMap, "P2::");
     return config;
 }
 
@@ -3006,7 +4307,7 @@ void MainComponent::showError(const juce::String& message) {
 juce::String MainComponent::buildSummaryText() const
 {
     juce::StringArray lines;
-    lines.add("PluginDNA Signal Summary");
+    lines.add("PluginDNA Summary");
     lines.add({});
 
     for (const auto* label : { &identityRoleLabel, &identityWhyLabel, &identityWatchLabel,
@@ -3027,9 +4328,1330 @@ juce::String MainComponent::buildSummaryText() const
     return lines.joinIntoString("\n");
 }
 
+
+void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory)
+{
+    const bool exportingFullPackage = overrideOutputDirectory.getFullPathName().isNotEmpty();
+    const auto outputPath = exportingFullPackage
+                          ? overrideOutputDirectory.getFullPathName()
+                          : outputPathEditor.getText().trim();
+    if (outputPath.isEmpty())
+    {
+        showError("Please specify an output path");
+        return;
+    }
+
+    juce::File outDir(outputPath);
+    if (!outDir.exists() && !outDir.createDirectory())
+    {
+        showError("Could not create output directory");
+        return;
+    }
+
+    std::vector<PendingExportDataset> datasets;
+    juce::StringArray fullPackageFiles;
+    Config config;
+    juce::String summary;
+    {
+        std::lock_guard<std::mutex> lock(pendingExportMutex);
+        if (!hasPendingEvidencePack || pendingExportDatasets.empty())
+        {
+            showError("Run a measurement before exporting evidence");
+            return;
+        }
+        config = pendingEvidenceConfig;
+        summary = pendingEvidenceSummary;
+        for (const auto& item : pendingExportDatasets)
+        {
+            fullPackageFiles.addIfNotAlreadyThere(item.filename);
+            if (!item.filename.startsWithIgnoreCase("grid_raw_"))
+                datasets.push_back(item);
+        }
+    }
+
+    exportEvidenceButton.setEnabled(false);
+    exportDataButton.setEnabled(false);
+    runMeasurementButton.setEnabled(false);
+    progressLabel.setText("Building compact evidence pack...", juce::dontSendNotification);
+
+    const auto pluginPath = pluginPathEditor.getText().trim();
+    const auto pluginInfo = pluginInfoLabel.getText();
+    const auto serialPluginPath = serialPluginPathEditor.getText().trim();
+    const auto serialPluginInfo = serialPluginInfoLabel.getText();
+    std::thread([this, outDir, config, summary, datasets = std::move(datasets), fullPackageFiles, pluginPath, pluginInfo, serialPluginPath, serialPluginInfo, exportingFullPackage]() mutable {
+        auto* root = new juce::DynamicObject();
+        root->setProperty("schema", "PluginDNA Evidence Pack");
+        root->setProperty("schemaVersion", 23);
+        root->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
+
+        const juce::File pluginFile(pluginPath);
+        auto* plugin = new juce::DynamicObject();
+        plugin->setProperty("name", pluginFile.getFileNameWithoutExtension());
+        plugin->setProperty("path", pluginPath);
+        plugin->setProperty("info", pluginInfo);
+        root->setProperty("plugin", juce::var(plugin));
+        if (serialPluginPath.isNotEmpty())
+        {
+            auto* serial = new juce::DynamicObject();
+            serial->setProperty("name", juce::File(serialPluginPath).getFileNameWithoutExtension());
+            serial->setProperty("path", serialPluginPath);
+            serial->setProperty("info", serialPluginInfo);
+            serial->setProperty("position", 2);
+            root->setProperty("serialPlugin", juce::var(serial));
+            root->setProperty("systemType", "two-plugin serial stage");
+        }
+        else root->setProperty("systemType", "single plugin");
+
+        auto* test = new juce::DynamicObject();
+        test->setProperty("sampleRate", config.sampleRate);
+        test->setProperty("durationSeconds", config.seconds);
+        test->setProperty("blockSize", config.blockSize);
+        test->setProperty("analysisMode", config.signalType);
+        test->setProperty("sineFrequencyHz", config.sineFrequency);
+        test->setProperty("sweepStartHz", config.sweepStartHz);
+        test->setProperty("sweepEndHz", config.sweepEndHz);
+        juce::Array<juce::var> aliasFrequencies;
+        for (const auto frequency : AliasAnalyzer::testFrequencies()) aliasFrequencies.add(frequency);
+        test->setProperty("aliasStressFrequenciesHz", aliasFrequencies);
+        test->setProperty("aliasDetectionFloorDb", -90.0);
+        juce::Array<juce::var> gainBuckets;
+        for (const auto gain : config.inputGainBucketsDb)
+            gainBuckets.add(gain);
+        test->setProperty("inputGainBucketsDb", gainBuckets);
+        juce::Array<juce::var> enabledAnalyzers;
+        for (const auto& analyzer : config.analyzers) enabledAnalyzers.add(analyzer);
+        test->setProperty("enabledAnalyzers", enabledAnalyzers);
+        root->setProperty("testConfiguration", juce::var(test));
+
+        juce::Array<juce::var> parameters;
+        for (const auto& bucket : config.parameterBuckets)
+        {
+            auto* parameter = new juce::DynamicObject();
+            parameter->setProperty("name", bucket.paramName);
+            parameter->setProperty("strategy", bucket.strategy);
+            const auto values = generatedBucketValues(bucket);
+            parameter->setProperty("hostRangeMin", bucket.min);
+            parameter->setProperty("hostRangeMax", bucket.max);
+            parameter->setProperty("pluginDefaultValue", bucket.pluginDefaultValue);
+            parameter->setProperty("defaultIncludedInScan", bucket.includePluginDefault && !bucket.strategy.equalsIgnoreCase("Enumerated"));
+            parameter->setProperty("testedValues", values);
+            if (bucket.strategy == "Enumerated")
+            {
+                juce::Array<juce::var> states;
+                for (size_t i = 0; i < bucket.values.size(); ++i)
+                {
+                    auto* state = new juce::DynamicObject();
+                    state->setProperty("value", bucket.values[i]);
+                    state->setProperty("label", i < bucket.valueLabels.size() ? bucket.valueLabels[i]
+                                                                                 : juce::String("State ") + juce::String(static_cast<int>(i) + 1));
+                    states.add(juce::var(state));
+                }
+                parameter->setProperty("states", states);
+                parameter->setProperty("parameterType", "enumerated mode selector");
+            }
+            else
+            {
+                parameter->setProperty("parameterType", "continuous");
+            }
+            parameter->setProperty("referencePolicy", "actual plugin default");
+            parameter->setProperty("referenceValue", bucket.pluginDefaultValue);
+            parameters.add(juce::var(parameter));
+        }
+        root->setProperty("parameters", parameters);
+        root->setProperty("parameterScanEnabled", !config.parameterBuckets.empty());
+        root->setProperty("scanType", config.parameterBuckets.size() == 0 ? "baseline current-state test"
+                                      : config.parameterBuckets.size() == 1 ? "parameter profile"
+                                      : config.parameterBuckets.size() == 2 ? "parameter coupling"
+                                      : "multi-parameter research grid");
+        root->setProperty("producerSummary", summary);
+
+        juce::Array<juce::var> evidence;
+        for (const auto& item : datasets)
+        {
+            if (item.filename.startsWithIgnoreCase("grid_raw_"))
+                continue;
+            evidence.add(summariseDatasetForEvidence(item.filename, item.dataset, config));
+        }
+        root->setProperty("evidence", evidence);
+
+        // Compact Evidence v2: one directly readable fingerprint per tested operating point.
+        // This is assembled from the derived analyser evidence above; no extra DSP pass is run.
+        const auto operatingPointDNA = buildOperatingPointDNA(evidence);
+        root->setProperty("operatingPointDNA", operatingPointDNA);
+        root->setProperty("compactThresholds", buildCompactThresholds(operatingPointDNA));
+
+        // Phase 2: Feature Extraction v2. Extracts a rich objective feature
+        // set from the evidence already in memory. No additional test passes.
+        {
+            juce::Array<juce::var> analyserFeatures;
+
+            const auto col = [](const MeasurementDataset& data, const juce::String& name)
+            {
+                return findColumn(data, name.toStdString());
+            };
+            const auto valueAt = [](const std::vector<double>& row, int c)
+            {
+                return c >= 0 && static_cast<std::size_t>(c) < row.size()
+                    ? row[static_cast<std::size_t>(c)]
+                    : std::numeric_limits<double>::quiet_NaN();
+            };
+            const auto collect = [&](const MeasurementDataset& data, const juce::String& name,
+                                     const std::function<bool(const std::vector<double>&)>& include)
+            {
+                std::vector<double> values;
+                const int c = col(data, name);
+                if (c < 0) return values;
+                values.reserve(data.rows.size());
+                for (const auto& row : data.rows)
+                {
+                    const double v = valueAt(row, c);
+                    if (std::isfinite(v) && (!include || include(row))) values.push_back(v);
+                }
+                return values;
+            };
+            const auto mean = [](const std::vector<double>& values)
+            {
+                if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
+                return std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(values.size());
+            };
+            const auto standardDeviation = [&](const std::vector<double>& values)
+            {
+                if (values.size() < 2) return 0.0;
+                const double m = mean(values);
+                double sum = 0.0;
+                for (const double v : values) sum += (v - m) * (v - m);
+                return std::sqrt(sum / static_cast<double>(values.size()));
+            };
+            const auto percentile = [](std::vector<double> values, double q)
+            {
+                if (values.empty()) return std::numeric_limits<double>::quiet_NaN();
+                std::sort(values.begin(), values.end());
+                const double pos = juce::jlimit(0.0, 1.0, q) * static_cast<double>(values.size() - 1);
+                const auto lo = static_cast<std::size_t>(std::floor(pos));
+                const auto hi = static_cast<std::size_t>(std::ceil(pos));
+                const double t = pos - static_cast<double>(lo);
+                return values[lo] * (1.0 - t) + values[hi] * t;
+            };
+            const auto meanColumn = [&](const MeasurementDataset& data, const juce::String& name,
+                                        const std::function<bool(const std::vector<double>&)>& include)
+            {
+                return mean(collect(data, name, include));
+            };
+            const auto allRows = [](const std::vector<double>&) { return true; };
+            const auto addNumber = [](juce::DynamicObject* object, const juce::String& key, double value)
+            {
+                if (std::isfinite(value)) object->setProperty(key, value);
+            };
+            const auto addStats = [&](juce::DynamicObject* object, const juce::String& prefix,
+                                      const std::vector<double>& values)
+            {
+                if (values.empty()) return;
+                addNumber(object, prefix + "Mean", mean(values));
+                addNumber(object, prefix + "StdDev", standardDeviation(values));
+                addNumber(object, prefix + "Min", *std::min_element(values.begin(), values.end()));
+                addNumber(object, prefix + "Max", *std::max_element(values.begin(), values.end()));
+                addNumber(object, prefix + "P10", percentile(values, 0.10));
+                addNumber(object, prefix + "P90", percentile(values, 0.90));
+            };
+
+            for (const auto& exportItem : datasets)
+            {
+                const auto& data = exportItem.dataset;
+                auto* feature = new juce::DynamicObject();
+                feature->setProperty("source", exportItem.filename);
+                bool useful = false;
+
+                if (exportItem.filename.containsIgnoreCase("grid_rms_peak"))
+                {
+                    feature->setProperty("family", "levelDynamics");
+                    std::vector<double> levelChanges, peakChanges, crestInValues, crestOutValues, crestChanges;
+                    std::vector<double> inputRmsDb, outputRmsDb, inputPeakDb, outputPeakDb;
+                    const int ri = col(data, "rmsInL"), ro = col(data, "rmsOutL");
+                    const int pi = col(data, "peakInL"), po = col(data, "peakOutL");
+                    for (const auto& row : data.rows)
+                    {
+                        const double inRms = valueAt(row, ri), outRms = valueAt(row, ro);
+                        const double inPeak = valueAt(row, pi), outPeak = valueAt(row, po);
+                        if (!(inRms > 0.0 && outRms > 0.0 && inPeak > 0.0 && outPeak > 0.0)) continue;
+                        const double inRmsDb = amplitudeToDb(inRms), outRmsDb = amplitudeToDb(outRms);
+                        const double inPeakDb = amplitudeToDb(inPeak), outPeakDb = amplitudeToDb(outPeak);
+                        const double crestIn = inPeakDb - inRmsDb;
+                        const double crestOut = outPeakDb - outRmsDb;
+                        inputRmsDb.push_back(inRmsDb); outputRmsDb.push_back(outRmsDb);
+                        inputPeakDb.push_back(inPeakDb); outputPeakDb.push_back(outPeakDb);
+                        levelChanges.push_back(outRmsDb - inRmsDb);
+                        peakChanges.push_back(outPeakDb - inPeakDb);
+                        crestInValues.push_back(crestIn); crestOutValues.push_back(crestOut);
+                        crestChanges.push_back(crestOut - crestIn);
+                    }
+                    addStats(feature, "levelChangeDb", levelChanges);
+                    addStats(feature, "peakChangeDb", peakChanges);
+                    addStats(feature, "crestFactorInDb", crestInValues);
+                    addStats(feature, "crestFactorOutDb", crestOutValues);
+                    addStats(feature, "crestFactorChangeDb", crestChanges);
+                    if (!inputRmsDb.empty())
+                    {
+                        const double xMean = mean(inputRmsDb), yMean = mean(outputRmsDb);
+                        double cov = 0.0, var = 0.0;
+                        for (std::size_t i = 0; i < inputRmsDb.size(); ++i)
+                        { cov += (inputRmsDb[i]-xMean)*(outputRmsDb[i]-yMean); var += (inputRmsDb[i]-xMean)*(inputRmsDb[i]-xMean); }
+                        if (var > 1.0e-12) addNumber(feature, "rmsTransferSlope", cov / var);
+                    }
+                    addNumber(feature, "peakToRmsChangeCorrelation", [&]()
+                    {
+                        if (levelChanges.size() < 2) return std::numeric_limits<double>::quiet_NaN();
+                        const double a = mean(levelChanges), b = mean(peakChanges);
+                        double num=0.0, da=0.0, db=0.0;
+                        for (std::size_t i=0;i<levelChanges.size();++i)
+                        { const double xa=levelChanges[i]-a, xb=peakChanges[i]-b; num+=xa*xb; da+=xa*xa; db+=xb*xb; }
+                        return da>0.0 && db>0.0 ? num/std::sqrt(da*db) : 0.0;
+                    }());
+                    useful = !levelChanges.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_alias_stress"))
+                {
+                    feature->setProperty("family", "aliasStress");
+                    const auto aliasRatios = collect(data, "aliasPowerRatio", allRows);
+                    const auto aliasDb = collect(data, "aliasPowerDb", allRows);
+                    const auto detected = collect(data, "detectedFoldCount", allRows);
+                    const auto integrity = collect(data, "ladderIntegrity", allRows);
+                    addStats(feature, "aliasPowerRatio", aliasRatios);
+                    addStats(feature, "aliasPowerDb", aliasDb);
+                    addStats(feature, "detectedFoldCount", detected);
+                    addStats(feature, "ladderIntegrity", integrity);
+
+                    const int fcol = col(data, "fundamentalHz");
+                    const int acol = col(data, "aliasPowerDb");
+                    double firstDetected = std::numeric_limits<double>::quiet_NaN();
+                    double highestClean = std::numeric_limits<double>::quiet_NaN();
+                    double strongestDb = -300.0;
+                    double strongestAt = 0.0;
+                    for (const auto& row : data.rows)
+                    {
+                        const double f = valueAt(row, fcol);
+                        const double a = valueAt(row, acol);
+                        if (!std::isfinite(f) || !std::isfinite(a)) continue;
+                        if (a >= -90.0 && !std::isfinite(firstDetected)) firstDetected = f;
+                        if (a < -90.0) highestClean = std::isfinite(highestClean) ? std::max(highestClean, f) : f;
+                        if (a > strongestDb) { strongestDb = a; strongestAt = f; }
+                    }
+                    addNumber(feature, "firstDetectedAliasFundamentalHz", firstDetected);
+                    addNumber(feature, "highestCleanFundamentalHz", highestClean);
+                    addNumber(feature, "strongestAliasPowerDb", strongestDb);
+                    addNumber(feature, "strongestAliasAtFundamentalHz", strongestAt);
+                    useful = !aliasRatios.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_thd_sine"))
+                {
+                    feature->setProperty("family", "harmonicLadder");
+                    std::vector<double> thdDbValues, oddEvenDbValues, ladderSlopeValues, ladderSmoothnessValues;
+                    std::array<std::vector<double>, 11> harmonics;
+                    for (const auto& row : data.rows)
+                    {
+                        const double thd = valueAt(row, col(data, "thd"));
+                        if (thd > 0.0) thdDbValues.push_back(amplitudeToDb(thd));
+                        std::vector<std::pair<int,double>> active;
+                        double oddPower=0.0, evenPower=0.0;
+                        for (int h=2; h<=10; ++h)
+                        {
+                            const double v=valueAt(row,col(data,"h"+juce::String(h)));
+                            if (!(v>0.0)) continue;
+                            harmonics[static_cast<std::size_t>(h)].push_back(amplitudeToDb(v));
+                            active.push_back({h,amplitudeToDb(v)});
+                            if (h%2==0) evenPower+=v*v; else oddPower+=v*v;
+                        }
+                        if (oddPower>0.0 || evenPower>0.0)
+                            oddEvenDbValues.push_back(10.0*std::log10(std::max(oddPower,1.0e-30)/std::max(evenPower,1.0e-30)));
+                        if (active.size()>=3)
+                        {
+                            double sx=0,sy=0,sxx=0,sxy=0;
+                            for (const auto& hv:active){ const double x=static_cast<double>(hv.first), y=hv.second; sx+=x;sy+=y;sxx+=x*x;sxy+=x*y; }
+                            const double n=static_cast<double>(active.size()), den=n*sxx-sx*sx;
+                            if (std::abs(den)>1.0e-12)
+                            {
+                                const double slope=(n*sxy-sx*sy)/den, intercept=(sy-slope*sx)/n;
+                                ladderSlopeValues.push_back(slope);
+                                double err=0.0; for(const auto& hv:active){const double d=hv.second-(intercept+slope*hv.first);err+=d*d;}
+                                ladderSmoothnessValues.push_back(std::sqrt(err/n));
+                            }
+                        }
+                    }
+                    addStats(feature,"thdDb",thdDbValues);
+                    addStats(feature,"oddVsEvenDb",oddEvenDbValues);
+                    addStats(feature,"ladderSlopeDbPerOrder",ladderSlopeValues);
+                    addStats(feature,"ladderDeviationDb",ladderSmoothnessValues);
+                    for(int h=2;h<=10;++h) addStats(feature,"h"+juce::String(h)+"Db",harmonics[static_cast<std::size_t>(h)]);
+                    const int gc=col(data,"inputGainDb");
+                    std::vector<std::pair<double,double>> growth;
+                    for(const double gain:config.inputGainBucketsDb)
+                    {
+                        const double v=meanColumn(data,"thd",[&](const std::vector<double>& row){return std::abs(valueAt(row,gc)-gain)<0.01;});
+                        if(v>0.0) growth.push_back({gain,amplitudeToDb(v)});
+                    }
+                    if(growth.size()>=2)
+                    {
+                        addNumber(feature,"thdGrowthDbAcrossInputRange",growth.back().second-growth.front().second);
+                        addNumber(feature,"thdGrowthDbPerInputDb",(growth.back().second-growth.front().second)/std::max(1.0,growth.back().first-growth.front().first));
+                        double maxCurvature=0.0, kneeGain=growth.front().first;
+                        for(std::size_t i=1;i+1<growth.size();++i)
+                        {
+                            const double curvature=std::abs((growth[i+1].second-growth[i].second)-(growth[i].second-growth[i-1].second));
+                            if(curvature>maxCurvature){maxCurvature=curvature;kneeGain=growth[i].first;}
+                        }
+                        addNumber(feature,"thdGrowthCurvatureDb",maxCurvature);
+                        addNumber(feature,"estimatedThdKneeInputDb",kneeGain);
+                    }
+                    // Stability across input level: low values mean the harmonic fingerprint
+                    // retains its shape as the processor is driven.
+                    std::vector<double> harmonicLevelVariation;
+                    for (int h=2; h<=10; ++h)
+                    {
+                        std::vector<double> byGain;
+                        for (const double gain : config.inputGainBucketsDb)
+                        {
+                            const double v = meanColumn(data, "h"+juce::String(h), [&](const std::vector<double>& row)
+                            { return std::abs(valueAt(row,gc)-gain)<0.01; });
+                            if (v > 0.0) byGain.push_back(amplitudeToDb(v));
+                        }
+                        if (byGain.size() >= 2) harmonicLevelVariation.push_back(standardDeviation(byGain));
+                    }
+                    if (!harmonicLevelVariation.empty())
+                    {
+                        const double variation = mean(harmonicLevelVariation);
+                        addNumber(feature,"harmonicStabilityAcrossLevelDb",variation);
+                        addNumber(feature,"harmonicStabilityAcrossLevel",1.0/(1.0+variation));
+                    }
+                    if (!oddEvenDbValues.empty())
+                        addNumber(feature,"evenOddPowerRatioDb",-mean(oddEvenDbValues));
+                    useful=!thdDbValues.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_transfer_curves"))
+                {
+                    feature->setProperty("family", "transferCurve");
+                    const int xc=col(data,"x"), yc=col(data,"meanY");
+                    std::vector<std::pair<double,double>> points;
+                    for(const auto& row:data.rows){const double x=valueAt(row,xc),y=valueAt(row,yc);if(std::isfinite(x)&&std::isfinite(y))points.push_back({x,y});}
+                    std::sort(points.begin(),points.end());
+                    if(points.size()>=4)
+                    {
+                        double maxDev=0.0,maxSlope=-1.0e30,minSlope=1.0e30,positiveDev=0.0,negativeDev=0.0;
+                        int posCount=0,negCount=0,reversals=0,inflections=0; double prevSlope=0.0,prevDelta=0.0; bool haveSlope=false;
+                        for(std::size_t i=1;i<points.size();++i)
+                        {
+                            const double dx=points[i].first-points[i-1].first; if(std::abs(dx)<1.0e-12)continue;
+                            const double slope=(points[i].second-points[i-1].second)/dx;
+                            maxSlope=std::max(maxSlope,slope);minSlope=std::min(minSlope,slope);
+                            if(haveSlope){if(prevSlope>0.02&&slope<-0.02)++reversals; const double delta=slope-prevSlope;if((prevDelta>0&&delta<0)||(prevDelta<0&&delta>0))++inflections;prevDelta=delta;}
+                            else{prevDelta=0.0;haveSlope=true;} prevSlope=slope;
+                        }
+                        for(const auto& pt:points)
+                        {
+                            const double dev=pt.second-pt.first;maxDev=std::max(maxDev,std::abs(dev));
+                            if(pt.first>0){positiveDev+=dev;++posCount;}else if(pt.first<0){negativeDev+=dev;++negCount;}
+                        }
+                        const double symmetryError=(posCount&&negCount)?std::abs(positiveDev/posCount+negativeDev/negCount):0.0;
+                        std::vector<double> localSlopes;
+                        for(std::size_t i=1;i<points.size();++i){const double dx=points[i].first-points[i-1].first;if(std::abs(dx)>1.0e-12)localSlopes.push_back((points[i].second-points[i-1].second)/dx);}
+                        const double meanLocalSlope = mean(localSlopes);
+                        double localSlopeAtZero = std::numeric_limits<double>::quiet_NaN(), closestZero = std::numeric_limits<double>::max();
+                        for(std::size_t i=0;i<localSlopes.size();++i){const double midpoint=0.5*(points[i].first+points[i+1].first);if(std::abs(midpoint)<closestZero){closestZero=std::abs(midpoint);localSlopeAtZero=localSlopes[i];}}
+                        addNumber(feature,"maxStaticDeviation",maxDev);addNumber(feature,"maximumLocalSlope",maxSlope);addNumber(feature,"minimumLocalSlope",minSlope);
+                        addStats(feature,"localSlope",localSlopes);addNumber(feature,"localSlopeAtZero",localSlopeAtZero);
+                        const double symmetryIndex=1.0/(1.0+symmetryError);
+                        addNumber(feature,"curveSymmetryError",symmetryError);addNumber(feature,"curveAsymmetryScore",symmetryError/std::max(maxDev,1.0e-12));addNumber(feature,"symmetryIndex",symmetryIndex);
+                        double deviationPower=0.0,gainErrorPower=0.0;
+                        for(const auto& pt:points){const double nonlinearDeviation=pt.second-meanLocalSlope*pt.first;deviationPower+=nonlinearDeviation*nonlinearDeviation;const double gainError=(meanLocalSlope-1.0)*pt.first;gainErrorPower+=gainError*gainError;}
+                        const double nonlinearRms=std::sqrt(deviationPower/points.size()),gainErrorRms=std::sqrt(gainErrorPower/points.size());
+                        addNumber(feature,"saturationEfficiency",nonlinearRms/std::max(1.0e-15,nonlinearRms+gainErrorRms));
+                        feature->setProperty("foldbackReversalCount",reversals);feature->setProperty("inflectionCount",inflections);
+                        addNumber(feature,"outputAtPositiveLimit",points.back().second);addNumber(feature,"outputAtNegativeLimit",points.front().second);
+                        addNumber(feature,"limitCompressionRatio",std::abs(points.back().second-points.front().second)/std::max(1.0e-12,std::abs(points.back().first-points.front().first)));
+                        useful=true;
+                    }
+                }
+                else if (exportItem.filename.containsIgnoreCase("linear_response"))
+                {
+                    feature->setProperty("family", "frequencyResponse");
+                    const int fc=col(data,"freqHz"), mc=col(data,"magDb");
+                    const auto band=[&](double lo,double hi){return meanColumn(data,"magDb",[&](const std::vector<double>& row){const double f=valueAt(row,fc);return f>=lo&&f<=hi;});};
+                    const double sub=band(20,60),bass=band(60,200),lowMid=band(200,500),mid=band(500,2000),presence=band(2000,6000),high=band(6000,12000),air=band(12000,20000);
+                    addNumber(feature,"subDb",sub);addNumber(feature,"bassDb",bass);addNumber(feature,"lowMidDb",lowMid);addNumber(feature,"midDb",mid);
+                    addNumber(feature,"presenceDb",presence);addNumber(feature,"highDb",high);addNumber(feature,"airDb",air);
+                    if(std::isfinite(mid)){addNumber(feature,"subVsMidDb",sub-mid);addNumber(feature,"bassVsMidDb",bass-mid);addNumber(feature,"lowMidVsMidDb",lowMid-mid);addNumber(feature,"presenceVsMidDb",presence-mid);addNumber(feature,"highVsMidDb",high-mid);addNumber(feature,"airVsMidDb",air-mid);}
+                    std::vector<double> logF,mags;double weighted=0.0,totalWeight=0.0,maxMag=-1.0e30,minMag=1.0e30,maxFreq=0.0,minFreq=0.0;
+                    for(const auto& row:data.rows){const double f=valueAt(row,fc),m=valueAt(row,mc);if(!(f>0.0&&std::isfinite(m)))continue;logF.push_back(std::log2(f));mags.push_back(m);const double w=std::pow(10.0,m/20.0);weighted+=f*w;totalWeight+=w;if(m>maxMag){maxMag=m;maxFreq=f;}if(m<minMag){minMag=m;minFreq=f;}}
+                    if(logF.size()>=2)
+                    {
+                        const double xm=mean(logF),ym=mean(mags);double cov=0,var=0;for(std::size_t i=0;i<logF.size();++i){cov+=(logF[i]-xm)*(mags[i]-ym);var+=(logF[i]-xm)*(logF[i]-xm);}if(var>0)addNumber(feature,"overallTiltDbPerOctave",cov/var);
+                        addNumber(feature,"responseRippleDb",maxMag-minMag);addNumber(feature,"strongestBoostDb",maxMag);addNumber(feature,"strongestBoostFrequencyHz",maxFreq);addNumber(feature,"deepestCutDb",minMag);addNumber(feature,"deepestCutFrequencyHz",minFreq);
+                        if(totalWeight>0)addNumber(feature,"responseEnergyCentroidHz",weighted/totalWeight);
+                    }
+                    useful=!mags.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("harmonic_fingerprint"))
+                {
+                    feature->setProperty("family", "frequencyDependentHarmonics");
+                    const int fc=col(data,"fundamentalHz"),hc=col(data,"harmonicOrder"),mc=col(data,"magDbRelativeToInput");
+                    std::array<std::vector<double>,8> byOrder;std::vector<double> low,mid,high;
+                    for(const auto& row:data.rows){const int h=static_cast<int>(std::llround(valueAt(row,hc)));const double f=valueAt(row,fc),m=valueAt(row,mc);if(h>=2&&h<=7&&std::isfinite(m)){byOrder[static_cast<std::size_t>(h)].push_back(m);if(f<200)low.push_back(m);else if(f<3000)mid.push_back(m);else high.push_back(m);}}
+                    for(int h=2;h<=7;++h)addStats(feature,"h"+juce::String(h)+"Db",byOrder[static_cast<std::size_t>(h)]);
+                    addStats(feature,"lowBandHarmonicDb",low);addStats(feature,"midBandHarmonicDb",mid);addStats(feature,"highBandHarmonicDb",high);
+                    if(!byOrder[2].empty()&&!byOrder[3].empty())addNumber(feature,"h2VsH3Db",mean(byOrder[2])-mean(byOrder[3]));
+                    double lowOrder=0,highOrder=0;for(int h=2;h<=7;++h){const double m=mean(byOrder[static_cast<std::size_t>(h)]);if(!std::isfinite(m))continue;const double a=std::pow(10.0,m/20.0);if(h<=3)lowOrder+=a*a;else highOrder+=a*a;}if(lowOrder>0)addNumber(feature,"highOrderVsLowOrderDb",10.0*std::log10(std::max(highOrder,1.0e-30)/lowOrder));
+                    useful=!low.empty()||!mid.empty()||!high.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_residual_dna"))
+                {
+                    feature->setProperty("family", "residual");
+                    const auto overall=collect(data,"residualDbRelativeToOutput",allRows),low=collect(data,"lowResidualDb",allRows),mid=collect(data,"midResidualDb",allRows),high=collect(data,"highResidualDb",allRows),ultra=collect(data,"ultrasonicResidualDb",allRows);
+                    addStats(feature,"overallResidualDb",overall);addStats(feature,"lowResidualDb",low);addStats(feature,"midResidualDb",mid);addStats(feature,"highResidualDb",high);addStats(feature,"ultrasonicResidualDb",ultra);
+                    addNumber(feature,"residualLowVsMidDb",mean(low)-mean(mid));addNumber(feature,"residualHighVsMidDb",mean(high)-mean(mid));addNumber(feature,"residualUltrasonicVsHighDb",mean(ultra)-mean(high));
+                    addStats(feature,"alignmentLagSamples",collect(data,"lagSamples",allRows));addStats(feature,"alignmentGainDb",collect(data,"gainDb",allRows));
+                    addStats(feature,"residualCentroidHz",collect(data,"residualSpectralCentroidHz",allRows));
+                    addStats(feature,"residualBandwidthHz",collect(data,"residualEffectiveBandwidthHz",allRows));
+                    addStats(feature,"residualEntropyBits",collect(data,"residualSpectralEntropyBits",allRows));
+                    addStats(feature,"residualEntropyNormalized",collect(data,"residualSpectralEntropyNormalized",allRows));
+                    if(!overall.empty())addNumber(feature,"residualDynamicRangeDb",*std::max_element(overall.begin(),overall.end())-*std::min_element(overall.begin(),overall.end()));
+                    useful=!overall.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_interaction_dna"))
+                {
+                    feature->setProperty("family", "interaction");
+                    const int pc=col(data,"productClass"),gc=col(data,"inputGainDb");
+                    const auto overall=collect(data,"magDbRelativeToInput",allRows);addStats(feature,"productDb",overall);
+                    for(int cls=1;cls<=4;++cls){const auto vals=collect(data,"magDbRelativeToInput",[&](const std::vector<double>& row){return std::llround(valueAt(row,pc))==cls;});addStats(feature,"productClass"+juce::String(cls)+"Db",vals);}
+                    std::vector<std::pair<double,double>> growth;for(const double gain:config.inputGainBucketsDb){const double v=meanColumn(data,"magDbRelativeToInput",[&](const std::vector<double>& row){return std::abs(valueAt(row,gc)-gain)<0.01;});if(std::isfinite(v))growth.push_back({gain,v});}
+                    if(growth.size()>=2){addNumber(feature,"interactionGrowthDb",growth.back().second-growth.front().second);addNumber(feature,"interactionGrowthDbPerInputDb",(growth.back().second-growth.front().second)/std::max(1.0,growth.back().first-growth.front().first));}
+                    if(!overall.empty()){addNumber(feature,"productDensityAboveMinus80Db",static_cast<double>(std::count_if(overall.begin(),overall.end(),[](double v){return v>-80.0;}))/overall.size());addNumber(feature,"worstProductDb",*std::max_element(overall.begin(),overall.end()));}
+                    useful=!overall.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_timing_dna"))
+                {
+                    feature->setProperty("family", "timingPhase");
+                    const int rc=col(data,"recordType"),fc=col(data,"frequencyHz"),pc=col(data,"phaseDegrees"),mc=col(data,"magnitudeDb");
+                    const auto summary=[&](const std::vector<double>& row){return std::llround(valueAt(row,rc))==2;};
+                    addStats(feature,"latencySamples",collect(data,"latencySamples",summary));addStats(feature,"latencyMs",collect(data,"latencyMs",summary));
+                    addStats(feature,"preRingingDb",collect(data,"preRingingDb",summary));addStats(feature,"postRingingDb",collect(data,"postRingingDb",summary));
+                    addStats(feature,"settlingMs",collect(data,"settlingMs",summary));addStats(feature,"overshootDb",collect(data,"overshootDb",summary));
+                    std::vector<std::pair<double,double>> phase;std::vector<double> lowPhase,midPhase,highPhase,lowMag,midMag,highMag;
+                    for(const auto& row:data.rows){if(std::llround(valueAt(row,rc))!=1)continue;const double f=valueAt(row,fc),pdeg=valueAt(row,pc),mag=valueAt(row,mc);if(!(f>0&&std::isfinite(pdeg)))continue;phase.push_back({f,pdeg});if(f<200){lowPhase.push_back(pdeg);lowMag.push_back(mag);}else if(f<3000){midPhase.push_back(pdeg);midMag.push_back(mag);}else{highPhase.push_back(pdeg);highMag.push_back(mag);}}
+                    addStats(feature,"lowPhaseDegrees",lowPhase);addStats(feature,"midPhaseDegrees",midPhase);addStats(feature,"highPhaseDegrees",highPhase);addStats(feature,"lowMagnitudeDb",lowMag);addStats(feature,"midMagnitudeDb",midMag);addStats(feature,"highMagnitudeDb",highMag);
+                    if(phase.size()>=2){std::sort(phase.begin(),phase.end());std::vector<double> groupDelayMs;for(std::size_t i=1;i<phase.size();++i){const double df=phase[i].first-phase[i-1].first;if(df<=0)continue;double dp=phase[i].second-phase[i-1].second;while(dp>180)dp-=360;while(dp<-180)dp+=360;groupDelayMs.push_back(-dp/360.0/df*1000.0);}addStats(feature,"groupDelayMs",groupDelayMs);}
+                    useful=true;
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_stereo_dna"))
+                {
+                    feature->setProperty("family", "stereo");
+                    addStats(feature,"leftOnlyCrosstalkDb",collect(data,"leftOnlyLeakDb",allRows));
+                    addStats(feature,"rightOnlyCrosstalkDb",collect(data,"rightOnlyLeakDb",allRows));
+                    addStats(feature,"midChannelMismatchDb",collect(data,"midChannelMismatchDb",allRows));
+                    addStats(feature,"sideChannelMismatchDb",collect(data,"sideChannelMismatchDb",allRows));
+                    addStats(feature,"midToSideLeakDb",collect(data,"midToSideLeakDb",allRows));
+                    addStats(feature,"sideToMidLeakDb",collect(data,"sideToMidLeakDb",allRows));
+                    addStats(feature,"midCorrelation",collect(data,"midCorrelation",allRows));
+                    addStats(feature,"sideCorrelation",collect(data,"sideCorrelation",allRows));
+                    useful=!data.rows.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_summing_dna"))
+                {
+                    feature->setProperty("family", "summing");
+                    addStats(feature,"separateProcessedRms",collect(data,"separateRms",allRows));
+                    addStats(feature,"summedProcessedRms",collect(data,"summedRms",allRows));
+                    addStats(feature,"interactionResidualRms",collect(data,"interactionResidualRms",allRows));
+                    addStats(feature,"interactionResidualDbRelative",collect(data,"interactionResidualDbRelative",allRows));
+                    addStats(feature,"summedCrestDb",collect(data,"summedCrestDb",allRows));
+                    addStats(feature,"nonAdditivityPercent",collect(data,"nonAdditivityPercent",allRows));
+                    useful=!data.rows.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_boundary_dna"))
+                {
+                    feature->setProperty("family", "boundaries");
+                    const int cc=col(data,"componentClass"),tc=col(data,"testId"),gc=col(data,"inputGainDb"),fc=col(data,"frequencyHz");
+                    addStats(feature,"dcOffset",collect(data,"dcOffset",allRows));addStats(feature,"transferDb",collect(data,"transferDb",allRows));addStats(feature,"phaseDegrees",collect(data,"phaseDegrees",allRows));addStats(feature,"outputDbRelativeToInputRms",collect(data,"outputDbRelativeToInputRms",allRows));
+                    for(int cls=0;cls<=8;++cls){const auto vals=collect(data,"outputDbRelativeToInputRms",[&](const std::vector<double>& row){return std::llround(valueAt(row,cc))==cls;});if(!vals.empty())addStats(feature,"componentClass"+juce::String(cls)+"Db",vals);}
+                    std::vector<std::pair<double,double>> worstByGain;for(const double gain:config.inputGainBucketsDb){const auto vals=collect(data,"outputDbRelativeToInputRms",[&](const std::vector<double>& row){return std::abs(valueAt(row,gc)-gain)<0.01;});if(!vals.empty())worstByGain.push_back({gain,*std::max_element(vals.begin(),vals.end())});}
+                    if(worstByGain.size()>=2){addNumber(feature,"boundaryGrowthDb",worstByGain.back().second-worstByGain.front().second);double onset=worstByGain.back().first;for(const auto& p:worstByGain)if(p.second>-80.0){onset=p.first;break;}addNumber(feature,"firstBoundaryProductAboveMinus80InputDb",onset);}
+                    addNumber(feature,"highestMeasuredFrequencyHz",meanColumn(data,"frequencyHz",[&](const std::vector<double>& row){return valueAt(row,fc)>0;}));
+                    useful=true;
+                }
+
+                if (useful) analyserFeatures.add(juce::var(feature)); else delete feature;
+            }
+
+            auto* featureDna = new juce::DynamicObject();
+            featureDna->setProperty("extractorVersion", 7);
+            featureDna->setProperty("policy", "compact evidence v2 plus complete static feature audit, operating-point DNA, alias thresholds, stereo, summing, residual entropy, harmonic stability and transfer efficiency extraction");
+            featureDna->setProperty("analysers", analyserFeatures);
+            root->setProperty("featureDNA", juce::var(featureDna));
+        }
+
+        // Phase 2: Behaviour Engine v1. Converts numeric evidence into concise,
+        // measurable signal behaviours. No subjective sound adjectives.
+        {
+            juce::Array<juce::var> behaviours;
+            const auto addBehaviour = [&behaviours](const juce::String& id,
+                                                    const juce::String& statement,
+                                                    double confidence,
+                                                    const juce::StringArray& sources,
+                                                    const juce::String& detail)
+            {
+                auto* item = new juce::DynamicObject();
+                item->setProperty("id", id);
+                item->setProperty("statement", statement);
+                item->setProperty("confidence", juce::jlimit(0.0, 1.0, confidence));
+                juce::Array<juce::var> sourceArray;
+                for (const auto& source : sources) sourceArray.add(source);
+                item->setProperty("evidenceSources", sourceArray);
+                item->setProperty("detail", detail);
+                behaviours.add(juce::var(item));
+            };
+            const auto meanColumn = [](const MeasurementDataset& data, const juce::String& name,
+                                       const std::function<bool(const std::vector<double>&)>& include)
+            {
+                const int c = findColumn(data, name.toStdString());
+                if (c < 0) return std::numeric_limits<double>::quiet_NaN();
+                double sum = 0.0; int count = 0;
+                for (const auto& row : data.rows)
+                {
+                    if (static_cast<std::size_t>(c) >= row.size() || !std::isfinite(row[static_cast<std::size_t>(c)])) continue;
+                    if (include && !include(row)) continue;
+                    sum += row[static_cast<std::size_t>(c)]; ++count;
+                }
+                return count > 0 ? sum / static_cast<double>(count) : std::numeric_limits<double>::quiet_NaN();
+            };
+            const auto allRows = [](const std::vector<double>&) { return true; };
+
+            for (const auto& exportItem : datasets)
+            {
+                const auto& data = exportItem.dataset;
+                if (exportItem.filename.containsIgnoreCase("grid_thd_sine"))
+                {
+                    const double h2 = meanColumn(data, "h2", allRows);
+                    const double h3 = meanColumn(data, "h3", allRows);
+                    if (std::isfinite(h2) && std::isfinite(h3) && h2 > 0.0 && h3 > 0.0)
+                    {
+                        const double differenceDb = amplitudeToDb(h2) - amplitudeToDb(h3);
+                        if (differenceDb > 4.0)
+                            addBehaviour("builds_even_harmonics", "Builds mainly even-order harmonics",
+                                         juce::jlimit(0.60, 0.96, 0.68 + differenceDb / 50.0),
+                                         {"THD sine"}, "H2 exceeds H3 by " + juce::String(differenceDb, 1) + " dB.");
+                        else if (differenceDb < -4.0)
+                            addBehaviour("builds_odd_harmonics", "Builds mainly odd-order harmonics",
+                                         juce::jlimit(0.60, 0.96, 0.68 + std::abs(differenceDb) / 50.0),
+                                         {"THD sine"}, "H3 exceeds H2 by " + juce::String(std::abs(differenceDb), 1) + " dB.");
+                        else
+                            addBehaviour("builds_mixed_harmonics", "Builds a mixed even/odd harmonic ladder",
+                                         0.70, {"THD sine"}, "H2 and H3 remain within 4 dB.");
+                    }
+                }
+                else if (exportItem.filename.containsIgnoreCase("linear_response_sweep"))
+                {
+                    const int fc = findColumn(data, "freqHz");
+                    const auto band = [&](double lo, double hi)
+                    {
+                        return meanColumn(data, "magDb", [=](const std::vector<double>& row)
+                        {
+                            if (fc < 0 || static_cast<std::size_t>(fc) >= row.size()) return false;
+                            const double f = row[static_cast<std::size_t>(fc)];
+                            return f >= lo && f <= hi;
+                        });
+                    };
+                    const double low = band(40.0, 150.0), mid = band(500.0, 2000.0), high = band(10000.0, 20000.0);
+                    if (std::isfinite(low) && std::isfinite(mid) && std::isfinite(high))
+                    {
+                        const double lowDelta = low - mid, highDelta = high - mid;
+                        if (lowDelta > 0.5)
+                            addBehaviour("pushes_lows", "Pushes lows relative to the midrange", 0.82,
+                                         {"Sweep linear response"}, "Low band is " + juce::String(lowDelta, 2) + " dB above the midrange.");
+                        else if (lowDelta < -0.5)
+                            addBehaviour("reduces_lows", "Reduces lows relative to the midrange", 0.82,
+                                         {"Sweep linear response"}, "Low band is " + juce::String(std::abs(lowDelta), 2) + " dB below the midrange.");
+                        if (highDelta < -0.5)
+                            addBehaviour("rolls_highs", "Rolls extreme highs relative to the midrange", 0.86,
+                                         {"Sweep linear response"}, "High band is " + juce::String(std::abs(highDelta), 2) + " dB below the midrange.");
+                        else if (highDelta > 0.5)
+                            addBehaviour("pushes_highs", "Pushes extreme highs relative to the midrange", 0.86,
+                                         {"Sweep linear response"}, "High band is " + juce::String(highDelta, 2) + " dB above the midrange.");
+                        if (std::abs(lowDelta) <= 0.5 && std::abs(highDelta) <= 0.5)
+                            addBehaviour("keeps_frequency_balance", "Keeps broad frequency balance essentially flat", 0.80,
+                                         {"Sweep linear response"}, "Low and high bands remain within 0.5 dB of the midrange.");
+                    }
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_residual_dna"))
+                {
+                    const double residual = meanColumn(data, "residualDbRelativeToOutput", allRows);
+                    const double low = meanColumn(data, "lowResidualDb", allRows);
+                    const double mid = meanColumn(data, "midResidualDb", allRows);
+                    const double high = meanColumn(data, "highResidualDb", allRows);
+                    if (std::isfinite(residual))
+                    {
+                        if (residual < -50.0)
+                            addBehaviour("adds_little_fingerprint", "Adds little residual fingerprint", 0.88,
+                                         {"Residual DNA"}, "Aligned residual averages " + juce::String(residual, 1) + " dB relative to output.");
+                        else if (residual > -25.0)
+                            addBehaviour("adds_strong_fingerprint", "Adds a strong residual fingerprint", 0.84,
+                                         {"Residual DNA"}, "Aligned residual averages " + juce::String(residual, 1) + " dB relative to output.");
+                    }
+                    if (std::isfinite(low) && std::isfinite(mid) && std::isfinite(high))
+                    {
+                        if (low > mid + 3.0 && low > high + 3.0)
+                            addBehaviour("adds_low_texture", "Concentrates its added fingerprint in the low band", 0.84,
+                                         {"Residual DNA"}, "Low-band residual exceeds mid and high bands by more than 3 dB.");
+                        else if (high > low + 3.0 && high > mid + 3.0)
+                            addBehaviour("adds_high_texture", "Concentrates its added fingerprint in the high band", 0.84,
+                                         {"Residual DNA"}, "High-band residual exceeds low and mid bands by more than 3 dB.");
+                    }
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_timing_dna"))
+                {
+                    const int rc = findColumn(data, "recordType");
+                    const auto summaryRows = [rc](const std::vector<double>& row)
+                    {
+                        return rc < 0 || (static_cast<std::size_t>(rc) < row.size() && std::llround(row[static_cast<std::size_t>(rc)]) == 2);
+                    };
+                    const double settling = meanColumn(data, "settlingMs", summaryRows);
+                    const double latency = meanColumn(data, "latencySamples", summaryRows);
+                    const double post = meanColumn(data, "postRingingDb", summaryRows);
+                    if (std::isfinite(settling) && settling <= 0.10)
+                        addBehaviour("settles_quickly", "Settles quickly after an impulse", 0.90,
+                                     {"Timing DNA"}, "Mean settling time is " + juce::String(settling, 3) + " ms.");
+                    if (std::isfinite(latency) && latency <= 1.0)
+                        addBehaviour("keeps_timing_immediate", "Keeps timing essentially immediate", 0.90,
+                                     {"Timing DNA"}, "Measured latency averages " + juce::String(latency, 2) + " samples.");
+                    if (std::isfinite(post) && post > -35.0)
+                        addBehaviour("adds_ringing", "Adds measurable post-impulse ringing", 0.72,
+                                     {"Timing DNA"}, "Post-ringing reaches " + juce::String(post, 1) + " dB relative to the main peak.");
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_interaction_dna"))
+                {
+                    const double interaction = meanColumn(data, "magDbRelativeToInput", allRows);
+                    if (std::isfinite(interaction) && interaction < -60.0)
+                        addBehaviour("keeps_signals_independent", "Keeps simultaneous tones largely independent", 0.86,
+                                     {"Interaction DNA"}, "Generated interaction products average " + juce::String(interaction, 1) + " dB relative to input.");
+                    else if (std::isfinite(interaction) && interaction > -40.0)
+                        addBehaviour("creates_interaction_products", "Creates substantial products between simultaneous tones", 0.84,
+                                     {"Interaction DNA"}, "Generated interaction products average " + juce::String(interaction, 1) + " dB relative to input.");
+                }
+            }
+
+            auto* behaviourDna = new juce::DynamicObject();
+            behaviourDna->setProperty("dictionaryVersion", 1);
+            behaviourDna->setProperty("languagePolicy", "signal behaviour only; no subjective sound adjectives");
+            behaviourDna->setProperty("behaviours", behaviours);
+            behaviourDna->setProperty("status", behaviours.isEmpty()
+                ? "insufficient derived evidence"
+                : "measured behaviours; thresholds require calibration across the reference set");
+            root->setProperty("behaviourDNA", juce::var(behaviourDna));
+        }
+
+        // Phase 2: compact Parameter DNA. This deliberately describes measured
+        // movement first; semantic producer labels are calibrated separately.
+        juce::Array<juce::var> parameterDna;
+        for (const auto& bucket : config.parameterBuckets)
+        {
+            std::vector<double> values;
+            const auto generatedValues = generatedBucketValues(bucket);
+            for (const auto& value : generatedValues)
+                values.push_back(static_cast<double>(value));
+            if (values.empty())
+                continue;
+
+            const double defaultValue = static_cast<double>(bucket.pluginDefaultValue);
+            std::size_t baselineIndex = 0;
+            for (std::size_t i = 1; i < values.size(); ++i)
+                if (std::abs(values[i] - defaultValue) < std::abs(values[baselineIndex] - defaultValue))
+                    baselineIndex = i;
+
+            std::vector<double> activity(values.size(), 0.0);
+            std::vector<int> activityCounts(values.size(), 0);
+            std::map<juce::String, double> sourceActivity;
+
+            const auto isStructuralColumn = [&](const juce::String& name)
+            {
+                if (name == bucket.paramName || name.equalsIgnoreCase("runId")
+                    || name.equalsIgnoreCase("inputGainDb") || name.equalsIgnoreCase("binIndex")
+                    || name.equalsIgnoreCase("centreSample") || name.equalsIgnoreCase("count")
+                    || name.equalsIgnoreCase("frequencyHz") || name.equalsIgnoreCase("fundamentalHz")
+                    || name.equalsIgnoreCase("harmonicOrder") || name.equalsIgnoreCase("recordType")
+                    || name.equalsIgnoreCase("testId") || name.equalsIgnoreCase("productHz")
+                    || name.equalsIgnoreCase("productClass"))
+                    return true;
+                for (const auto& other : config.parameterBuckets)
+                    if (name == other.paramName)
+                        return true;
+                return false;
+            };
+
+            for (const auto& item : datasets)
+            {
+                const auto& dataset = item.dataset;
+                int parameterColumn = -1;
+                for (std::size_t c = 0; c < dataset.columns.size(); ++c)
+                    if (juce::String(dataset.columns[c]) == bucket.paramName)
+                        parameterColumn = static_cast<int>(c);
+                if (parameterColumn < 0)
+                    continue;
+
+                double sourceTotal = 0.0;
+                int sourceCount = 0;
+                for (std::size_t metricColumn = 0; metricColumn < dataset.columns.size(); ++metricColumn)
+                {
+                    const auto metricName = juce::String(dataset.columns[metricColumn]);
+                    if (isStructuralColumn(metricName))
+                        continue;
+
+                    double globalMin = std::numeric_limits<double>::infinity();
+                    double globalMax = -std::numeric_limits<double>::infinity();
+                    for (const auto& row : dataset.rows)
+                    {
+                        if (metricColumn >= row.size() || !std::isfinite(row[metricColumn]))
+                            continue;
+                        bool otherParametersAtDefault = true;
+                        for (const auto& other : config.parameterBuckets)
+                        {
+                            if (other.paramName == bucket.paramName)
+                                continue;
+                            const int otherColumn = findColumn(dataset, other.paramName.toStdString());
+                            if (otherColumn >= 0 && static_cast<std::size_t>(otherColumn) < row.size()
+                                && std::abs(row[static_cast<std::size_t>(otherColumn)]
+                                            - static_cast<double>(other.pluginDefaultValue)) > 1.0e-4)
+                            {
+                                otherParametersAtDefault = false;
+                                break;
+                            }
+                        }
+                        if (!otherParametersAtDefault)
+                            continue;
+                        globalMin = std::min(globalMin, row[metricColumn]);
+                        globalMax = std::max(globalMax, row[metricColumn]);
+                    }
+                    const double range = globalMax - globalMin;
+                    if (!std::isfinite(range) || range < 1.0e-12)
+                        continue;
+
+                    std::vector<double> sums(values.size(), 0.0);
+                    std::vector<int> counts(values.size(), 0);
+                    for (const auto& row : dataset.rows)
+                    {
+                        if (static_cast<std::size_t>(parameterColumn) >= row.size()
+                            || metricColumn >= row.size() || !std::isfinite(row[metricColumn]))
+                            continue;
+                        bool otherParametersAtDefault = true;
+                        for (const auto& other : config.parameterBuckets)
+                        {
+                            if (other.paramName == bucket.paramName)
+                                continue;
+                            const int otherColumn = findColumn(dataset, other.paramName.toStdString());
+                            if (otherColumn >= 0 && static_cast<std::size_t>(otherColumn) < row.size()
+                                && std::abs(row[static_cast<std::size_t>(otherColumn)]
+                                            - static_cast<double>(other.pluginDefaultValue)) > 1.0e-4)
+                            {
+                                otherParametersAtDefault = false;
+                                break;
+                            }
+                        }
+                        if (!otherParametersAtDefault)
+                            continue;
+                        const double parameterValue = row[static_cast<std::size_t>(parameterColumn)];
+                        std::size_t nearest = 0;
+                        for (std::size_t i = 1; i < values.size(); ++i)
+                            if (std::abs(values[i] - parameterValue) < std::abs(values[nearest] - parameterValue))
+                                nearest = i;
+                        if (std::abs(values[nearest] - parameterValue) > 1.0e-4)
+                            continue;
+                        sums[nearest] += row[metricColumn];
+                        ++counts[nearest];
+                    }
+                    if (counts[baselineIndex] == 0)
+                        continue;
+                    const double baselineMean = sums[baselineIndex] / static_cast<double>(counts[baselineIndex]);
+                    for (std::size_t i = 0; i < values.size(); ++i)
+                    {
+                        if (counts[i] == 0)
+                            continue;
+                        const double mean = sums[i] / static_cast<double>(counts[i]);
+                        const double delta = juce::jlimit(0.0, 1.0, std::abs(mean - baselineMean) / range);
+                        activity[i] += delta;
+                        ++activityCounts[i];
+                        sourceTotal += delta;
+                        ++sourceCount;
+                    }
+                }
+                if (sourceCount > 0)
+                    sourceActivity[item.filename] = sourceTotal / static_cast<double>(sourceCount);
+            }
+
+            double maximumActivity = 0.0;
+            for (std::size_t i = 0; i < activity.size(); ++i)
+            {
+                if (activityCounts[i] > 0)
+                    activity[i] /= static_cast<double>(activityCounts[i]);
+                maximumActivity = std::max(maximumActivity, activity[i]);
+            }
+
+            const bool defaultInside = baselineIndex > 0 && baselineIndex + 1 < values.size();
+            const double endpointDifference = std::abs(activity.front() - activity.back());
+            const bool symmetric = values.size() >= 3 && maximumActivity > 0.01
+                                && endpointDifference <= std::max(0.03, maximumActivity * 0.25);
+            const bool centreNeutral = defaultInside && maximumActivity > 0.02
+                                    && activity[baselineIndex] <= maximumActivity * 0.15;
+
+            bool monotonicFromDefault = !defaultInside;
+            if (monotonicFromDefault && values.size() > 2)
+            {
+                if (baselineIndex == 0)
+                    for (std::size_t i = 1; i < activity.size(); ++i)
+                        monotonicFromDefault = monotonicFromDefault && activity[i] + 0.02 >= activity[i - 1];
+                else
+                    for (std::size_t i = activity.size() - 1; i > 0; --i)
+                        monotonicFromDefault = monotonicFromDefault && activity[i - 1] + 0.02 >= activity[i];
+            }
+
+            bool endLoaded = false;
+            if (!defaultInside && activity.size() >= 4)
+            {
+                std::vector<double> ordered = activity;
+                if (baselineIndex != 0)
+                    std::reverse(ordered.begin(), ordered.end());
+                double earlier = 0.0;
+                for (std::size_t i = 1; i + 1 < ordered.size(); ++i)
+                    earlier += std::max(0.0, ordered[i] - ordered[i - 1]);
+                earlier /= static_cast<double>(ordered.size() - 2);
+                const double finalStep = std::max(0.0, ordered.back() - ordered[ordered.size() - 2]);
+                endLoaded = finalStep > std::max(0.03, earlier * 1.75);
+            }
+
+            auto* dna = new juce::DynamicObject();
+            dna->setProperty("name", bucket.paramName);
+            dna->setProperty("pluginDefaultValue", defaultValue);
+            dna->setProperty("baselineValue", values[baselineIndex]);
+            dna->setProperty("baselineIsExactDefault", std::abs(values[baselineIndex] - defaultValue) < 1.0e-5);
+            dna->setProperty("strategy", bucket.strategy);
+            dna->setProperty("profileCondition", "all other selected parameters held at their plugin defaults");
+            dna->setProperty("shape", centreNeutral && symmetric ? "bipolar / centre-neutral"
+                                      : monotonicFromDefault ? (endLoaded ? "monotonic / end-loaded" : "monotonic")
+                                      : symmetric ? "symmetric" : "complex / non-monotonic");
+            dna->setProperty("symmetryDetected", symmetric);
+            dna->setProperty("centreNeutralDetected", centreNeutral);
+            dna->setProperty("endLoadedDetected", endLoaded);
+            dna->setProperty("maximumActivity", maximumActivity);
+            double sensitivitySum=0.0, maxStep=0.0; int sensitivityCount=0;
+            for(std::size_t i=1;i<activity.size();++i){const double dv=std::abs(values[i]-values[i-1]);if(dv<=0.0)continue;const double step=std::abs(activity[i]-activity[i-1])/dv;sensitivitySum+=step;maxStep=std::max(maxStep,step);++sensitivityCount;}
+            dna->setProperty("meanSensitivity",sensitivityCount? sensitivitySum/sensitivityCount : 0.0);
+            dna->setProperty("maximumSensitivity",maxStep);
+            juce::Array<juce::var> deadValues, usefulValues, criticalValues;
+            for(std::size_t i=0;i<values.size();++i){if(activity[i]<0.02)deadValues.add(values[i]);else usefulValues.add(values[i]);if(activity[i]>std::max(0.15,maximumActivity*0.75))criticalValues.add(values[i]);}
+            dna->setProperty("deadZoneValues",deadValues);dna->setProperty("usefulRangeValues",usefulValues);dna->setProperty("criticalRangeValues",criticalValues);
+            dna->setProperty("usefulRangeCoverage",values.empty()?0.0:static_cast<double>(usefulValues.size())/values.size());
+            dna->setProperty("controlClassCandidate", centreNeutral && symmetric ? "setup control"
+                                                   : monotonicFromDefault ? "amount control"
+                                                   : "character control");
+
+            juce::Array<juce::var> positions;
+            for (std::size_t i = 0; i < values.size(); ++i)
+            {
+                auto* position = new juce::DynamicObject();
+                position->setProperty("value", values[i]);
+                position->setProperty("isDefault", std::abs(values[i] - defaultValue) < 1.0e-5);
+                position->setProperty("deltaActivity", activity[i]);
+                positions.add(juce::var(position));
+            }
+            dna->setProperty("positions", positions);
+
+            std::vector<std::pair<juce::String, double>> rankedSources(sourceActivity.begin(), sourceActivity.end());
+            std::sort(rankedSources.begin(), rankedSources.end(), [](const auto& a, const auto& b)
+            {
+                return a.second > b.second;
+            });
+            juce::Array<juce::var> dominantSources;
+            for (std::size_t i = 0; i < std::min<std::size_t>(3, rankedSources.size()); ++i)
+            {
+                auto* source = new juce::DynamicObject();
+                source->setProperty("source", rankedSources[i].first);
+                source->setProperty("relativeMovement", rankedSources[i].second);
+                dominantSources.add(juce::var(source));
+            }
+            dna->setProperty("dominantEvidenceSources", dominantSources);
+
+            // Phase 3.1: universal DSP vocabulary. Preserve the manufacturer's
+            // parameter name, then describe the measured dimensions it changes.
+            struct InfluenceAxis
+            {
+                juce::String id;
+                juce::String name;
+                juce::String category;
+                juce::String generalisation;
+                juce::String explanation;
+                double score = 0.0;
+                juce::StringArray evidence;
+            };
+
+            std::vector<InfluenceAxis> axes {
+                { "transfer_symmetry", "Transfer symmetry", "Transfer",
+                  "Changes how the nonlinear stage treats positive and negative waveform excursions",
+                  "Changes waveform symmetry and therefore the balance of even and odd harmonics.", 0.0, {} },
+                { "transfer_shape", "Transfer shape", "Transfer",
+                  "Changes the shape or strength of the nonlinear transfer curve",
+                  "Changes how progressively peaks are bent, compressed, expanded or saturated.", 0.0, {} },
+                { "harmonic_balance", "Harmonic balance", "Harmonics",
+                  "Changes the balance and distribution of generated harmonics",
+                  "Changes which harmonic orders dominate and how the harmonic ladder develops.", 0.0, {} },
+                { "spectral_tilt", "Spectral tilt", "Frequency",
+                  "Changes the balance between low, mid and high frequencies",
+                  "Changes broad frequency weighting, such as low lift, mid emphasis or high-frequency roll-off.", 0.0, {} },
+                { "crest_behaviour", "Crest behaviour", "Dynamics",
+                  "Changes the relationship between average level and peaks",
+                  "Changes peak density or crest factor without necessarily changing average level by the same amount.", 0.0, {} },
+                { "residual_fingerprint", "Residual fingerprint", "Residual",
+                  "Changes the added signal left after the aligned dry signal is removed",
+                  "Changes the level, spectrum, density or tonality of the processor's added fingerprint.", 0.0, {} },
+                { "timing_response", "Timing response", "Timing",
+                  "Changes how energy arrives and settles in time",
+                  "Changes onset, ringing, overshoot, impulse width or settling behaviour.", 0.0, {} },
+                { "phase_response", "Phase response", "Phase",
+                  "Changes frequency-dependent timing alignment",
+                  "Changes phase rotation or group delay across the spectrum.", 0.0, {} },
+                { "signal_interaction", "Signal interaction", "Interaction",
+                  "Changes how simultaneous tones interact",
+                  "Changes intermodulation products and how complex signals generate new components.", 0.0, {} },
+                { "boundary_behaviour", "Boundary behaviour", "Limits",
+                  "Changes behaviour near DC, infrasonic, ultrasonic or level limits",
+                  "Changes stability, foldback, DC offset or other edge-of-range behaviour.", 0.0, {} }
+            };
+
+            const auto addAxisEvidence = [&axes](const juce::String& id, double amount, const juce::String& source)
+            {
+                for (auto& axis : axes)
+                {
+                    if (axis.id != id) continue;
+                    axis.score += juce::jlimit(0.0, 1.0, amount);
+                    if (!axis.evidence.contains(source, true)) axis.evidence.add(source);
+                    return;
+                }
+            };
+
+            for (const auto& [sourceName, movement] : sourceActivity)
+            {
+                const auto source = sourceName.toLowerCase();
+                if (source.contains("transfer"))
+                {
+                    addAxisEvidence("transfer_shape", movement, sourceName);
+                    addAxisEvidence("transfer_symmetry", movement * 0.85, sourceName);
+                }
+                if (source.contains("thd") || source.contains("harmonic"))
+                {
+                    addAxisEvidence("harmonic_balance", movement, sourceName);
+                    addAxisEvidence("transfer_symmetry", movement * 0.55, sourceName);
+                }
+                if (source.contains("linear") || source.contains("sweep"))
+                    addAxisEvidence("spectral_tilt", movement, sourceName);
+                if (source.contains("rms") || source.contains("peak"))
+                    addAxisEvidence("crest_behaviour", movement, sourceName);
+                if (source.contains("residual"))
+                    addAxisEvidence("residual_fingerprint", movement, sourceName);
+                if (source.contains("timing"))
+                {
+                    addAxisEvidence("timing_response", movement, sourceName);
+                    addAxisEvidence("phase_response", movement * 0.65, sourceName);
+                }
+                if (source.contains("interaction"))
+                    addAxisEvidence("signal_interaction", movement, sourceName);
+                if (source.contains("boundary"))
+                    addAxisEvidence("boundary_behaviour", movement, sourceName);
+            }
+
+            double topAxis = 0.0;
+            for (const auto& axis : axes) topAxis = std::max(topAxis, axis.score);
+            std::stable_sort(axes.begin(), axes.end(), [](const InfluenceAxis& a, const InfluenceAxis& b)
+            {
+                return a.score > b.score;
+            });
+
+            juce::Array<juce::var> influenceMatrix;
+            juce::Array<juce::var> whatItChanges;
+            juce::Array<juce::var> littleEffectOn;
+            for (const auto& axis : axes)
+            {
+                auto* influence = new juce::DynamicObject();
+                influence->setProperty("id", axis.id);
+                influence->setProperty("name", axis.name);
+                influence->setProperty("category", axis.category);
+                const double normalised = topAxis > 1.0e-12 ? juce::jlimit(0.0, 1.0, axis.score / topAxis) : 0.0;
+                influence->setProperty("influence", normalised);
+                influence->setProperty("influencePercent", juce::roundToInt(normalised * 100.0));
+                influence->setProperty("generalisation", axis.generalisation);
+                influence->setProperty("engineeringEffect", axis.explanation);
+                juce::Array<juce::var> axisEvidence;
+                for (const auto& e : axis.evidence) axisEvidence.add(e);
+                influence->setProperty("evidenceSources", axisEvidence);
+                influenceMatrix.add(juce::var(influence));
+
+                if (normalised >= 0.45 && whatItChanges.size() < 3)
+                    whatItChanges.add(axis.name);
+                if (normalised <= 0.12 && littleEffectOn.size() < 4)
+                    littleEffectOn.add(axis.name);
+            }
+
+            dna->setProperty("whatItChanges", whatItChanges);
+            dna->setProperty("measuredInfluence", influenceMatrix);
+            dna->setProperty("littleEffectOn", littleEffectOn);
+
+            if (!axes.empty() && axes.front().score > 1.0e-12)
+            {
+                dna->setProperty("primaryMeasuredConcept", axes.front().name);
+                dna->setProperty("generalisation", axes.front().generalisation);
+                dna->setProperty("engineeringEffect", axes.front().explanation);
+                dna->setProperty("conceptConfidence", juce::jlimit(0.0, 1.0,
+                    0.45 + 0.12 * static_cast<double>(axes.front().evidence.size())
+                    + 0.25 * (topAxis > 0.0 ? axes.front().score / topAxis : 0.0)));
+            }
+
+            dna->setProperty("interpretationStatus",
+                "universal measured vocabulary; manufacturer parameter name preserved");
+            parameterDna.add(juce::var(dna));
+        }
+        root->setProperty("parameterDNA", parameterDna);
+
+        // Phase 2: Coupling DNA. Only two selected parameters are interpreted as
+        // a deliberate pair. Individual profiles above remain conditioned on the
+        // other control's real plugin default.
+        if (config.parameterBuckets.size() == 2)
+        {
+            const auto& first = config.parameterBuckets[0];
+            const auto& second = config.parameterBuckets[1];
+            std::vector<double> firstValues;
+            std::vector<double> secondValues;
+            for (const auto& value : generatedBucketValues(first)) firstValues.push_back(static_cast<double>(value));
+            for (const auto& value : generatedBucketValues(second)) secondValues.push_back(static_cast<double>(value));
+
+            const auto nearestIndex = [](const std::vector<double>& values, double target)
+            {
+                std::size_t index = 0;
+                for (std::size_t i = 1; i < values.size(); ++i)
+                    if (std::abs(values[i] - target) < std::abs(values[index] - target)) index = i;
+                return index;
+            };
+
+            if (!firstValues.empty() && !secondValues.empty())
+            {
+                const auto firstDefaultIndex = nearestIndex(firstValues, first.pluginDefaultValue);
+                const auto secondDefaultIndex = nearestIndex(secondValues, second.pluginDefaultValue);
+                std::vector<std::vector<double>> coupling(firstValues.size(), std::vector<double>(secondValues.size(), 0.0));
+                std::vector<std::vector<int>> couplingCounts(firstValues.size(), std::vector<int>(secondValues.size(), 0));
+                std::map<juce::String, double> sourceCoupling;
+
+                for (const auto& item : datasets)
+                {
+                    const auto& dataset = item.dataset;
+                    const int firstColumn = findColumn(dataset, first.paramName.toStdString());
+                    const int secondColumn = findColumn(dataset, second.paramName.toStdString());
+                    if (firstColumn < 0 || secondColumn < 0)
+                        continue;
+
+                    double sourceTotal = 0.0;
+                    int sourceCount = 0;
+                    for (std::size_t metricColumn = 0; metricColumn < dataset.columns.size(); ++metricColumn)
+                    {
+                        const auto metricName = juce::String(dataset.columns[metricColumn]);
+                        if (metricName == first.paramName || metricName == second.paramName
+                            || metricName.equalsIgnoreCase("runId") || metricName.equalsIgnoreCase("inputGainDb")
+                            || metricName.equalsIgnoreCase("binIndex") || metricName.equalsIgnoreCase("centreSample")
+                            || metricName.equalsIgnoreCase("count") || metricName.equalsIgnoreCase("frequencyHz")
+                            || metricName.equalsIgnoreCase("fundamentalHz") || metricName.equalsIgnoreCase("harmonicOrder")
+                            || metricName.equalsIgnoreCase("recordType") || metricName.equalsIgnoreCase("testId")
+                            || metricName.equalsIgnoreCase("productHz") || metricName.equalsIgnoreCase("productClass"))
+                            continue;
+
+                        double globalMin = std::numeric_limits<double>::infinity();
+                        double globalMax = -std::numeric_limits<double>::infinity();
+                        std::vector<std::vector<double>> sums(firstValues.size(), std::vector<double>(secondValues.size(), 0.0));
+                        std::vector<std::vector<int>> counts(firstValues.size(), std::vector<int>(secondValues.size(), 0));
+
+                        for (const auto& row : dataset.rows)
+                        {
+                            if (static_cast<std::size_t>(firstColumn) >= row.size()
+                                || static_cast<std::size_t>(secondColumn) >= row.size()
+                                || metricColumn >= row.size() || !std::isfinite(row[metricColumn]))
+                                continue;
+                            const auto i = nearestIndex(firstValues, row[static_cast<std::size_t>(firstColumn)]);
+                            const auto j = nearestIndex(secondValues, row[static_cast<std::size_t>(secondColumn)]);
+                            if (std::abs(firstValues[i] - row[static_cast<std::size_t>(firstColumn)]) > 1.0e-4
+                                || std::abs(secondValues[j] - row[static_cast<std::size_t>(secondColumn)]) > 1.0e-4)
+                                continue;
+                            sums[i][j] += row[metricColumn];
+                            ++counts[i][j];
+                            globalMin = std::min(globalMin, row[metricColumn]);
+                            globalMax = std::max(globalMax, row[metricColumn]);
+                        }
+
+                        const double range = globalMax - globalMin;
+                        if (!std::isfinite(range) || range < 1.0e-12
+                            || counts[firstDefaultIndex][secondDefaultIndex] == 0)
+                            continue;
+                        const double baseline = sums[firstDefaultIndex][secondDefaultIndex]
+                                              / static_cast<double>(counts[firstDefaultIndex][secondDefaultIndex]);
+
+                        for (std::size_t i = 0; i < firstValues.size(); ++i)
+                        {
+                            if (counts[i][secondDefaultIndex] == 0) continue;
+                            const double firstOnly = sums[i][secondDefaultIndex]
+                                                   / static_cast<double>(counts[i][secondDefaultIndex]);
+                            for (std::size_t j = 0; j < secondValues.size(); ++j)
+                            {
+                                if (counts[firstDefaultIndex][j] == 0 || counts[i][j] == 0) continue;
+                                const double secondOnly = sums[firstDefaultIndex][j]
+                                                        / static_cast<double>(counts[firstDefaultIndex][j]);
+                                const double joint = sums[i][j] / static_cast<double>(counts[i][j]);
+                                const double expectedAdditive = firstOnly + secondOnly - baseline;
+                                const double synergy = juce::jlimit(0.0, 1.0, std::abs(joint - expectedAdditive) / range);
+                                coupling[i][j] += synergy;
+                                ++couplingCounts[i][j];
+                                sourceTotal += synergy;
+                                ++sourceCount;
+                            }
+                        }
+                    }
+                    if (sourceCount > 0)
+                        sourceCoupling[item.filename] = sourceTotal / static_cast<double>(sourceCount);
+                }
+
+                double overall = 0.0;
+                int overallCount = 0;
+                double maximum = 0.0;
+                std::size_t maximumI = firstDefaultIndex;
+                std::size_t maximumJ = secondDefaultIndex;
+                juce::Array<juce::var> cells;
+                for (std::size_t i = 0; i < firstValues.size(); ++i)
+                {
+                    for (std::size_t j = 0; j < secondValues.size(); ++j)
+                    {
+                        if (couplingCounts[i][j] > 0)
+                            coupling[i][j] /= static_cast<double>(couplingCounts[i][j]);
+                        if (i == firstDefaultIndex && j == secondDefaultIndex)
+                            continue;
+                        overall += coupling[i][j];
+                        ++overallCount;
+                        if (coupling[i][j] > maximum)
+                        {
+                            maximum = coupling[i][j];
+                            maximumI = i;
+                            maximumJ = j;
+                        }
+                        auto* cell = new juce::DynamicObject();
+                        cell->setProperty(first.paramName, firstValues[i]);
+                        cell->setProperty(second.paramName, secondValues[j]);
+                        cell->setProperty("nonAdditiveCoupling", coupling[i][j]);
+                        cells.add(juce::var(cell));
+                    }
+                }
+                if (overallCount > 0) overall /= static_cast<double>(overallCount);
+
+                auto* couplingDna = new juce::DynamicObject();
+                couplingDna->setProperty("parameters", juce::StringArray{first.paramName, second.paramName});
+                couplingDna->setProperty("reference", "both parameters at their actual plugin defaults");
+                couplingDna->setProperty("overallCoupling", overall);
+                couplingDna->setProperty("maximumCoupling", maximum);
+                couplingDna->setProperty("strength", maximum >= 0.12 ? "strong"
+                                                  : maximum >= 0.04 ? "moderate" : "weak");
+                auto* strongest = new juce::DynamicObject();
+                strongest->setProperty(first.paramName, firstValues[maximumI]);
+                strongest->setProperty(second.paramName, secondValues[maximumJ]);
+                couplingDna->setProperty("strongestInteractionAt", juce::var(strongest));
+                couplingDna->setProperty("grid", cells);
+
+                std::vector<std::pair<juce::String, double>> rankedSources(sourceCoupling.begin(), sourceCoupling.end());
+                std::sort(rankedSources.begin(), rankedSources.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+                juce::Array<juce::var> dominantSources;
+                for (std::size_t i = 0; i < std::min<std::size_t>(3, rankedSources.size()); ++i)
+                {
+                    auto* source = new juce::DynamicObject();
+                    source->setProperty("source", rankedSources[i].first);
+                    source->setProperty("relativeCoupling", rankedSources[i].second);
+                    dominantSources.add(juce::var(source));
+                }
+                couplingDna->setProperty("dominantEvidenceSources", dominantSources);
+                couplingDna->setProperty("interpretationStatus", "non-additive interaction only; musical meaning pending calibration");
+                root->setProperty("couplingDNA", juce::var(couplingDna));
+            }
+        }
+
+        root->setProperty("rawDataIncluded", false);
+        root->setProperty("rawDataPackagedAlongside", exportingFullPackage);
+        if (exportingFullPackage)
+        {
+            root->setProperty("rawDataLocation", ".");
+            root->setProperty("note", "Compact evidence JSON. Complete analyser CSV rows are stored alongside this file in the same full-evidence package.");
+        }
+        else
+        {
+            root->setProperty("note", "Compact Evidence v2. Per-run raw columns and redundant dataset bookkeeping are omitted; operatingPointDNA retains the derived fingerprint for every tested state. Use Export Raw Data for every analyser CSV and lossless evidence.");
+        }
+
+        const auto json = juce::JSON::toString(juce::var(root), true);
+        auto baseName = pluginFile.getFileNameWithoutExtension();
+        if (baseName.isEmpty())
+            baseName = "PluginDNA";
+        if (!config.parameterBuckets.empty())
+        {
+            juce::StringArray parameterNames;
+            for (const auto& bucket : config.parameterBuckets)
+                parameterNames.add(bucket.paramName);
+            baseName += "_" + parameterNames.joinIntoString("_");
+        }
+        baseName = baseName.retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_ ")
+                           .trim().replaceCharacter(' ', '_');
+        const auto filename = baseName + "_evidence_"
+                            + juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S") + ".json";
+        const auto file = outDir.getChildFile(filename);
+        bool success = file.replaceWithText(json);
+        const auto bytes = file.existsAsFile() ? file.getSize() : 0;
+
+        if (success && exportingFullPackage)
+        {
+            auto* manifest = new juce::DynamicObject();
+            manifest->setProperty("schema", "PluginDNA Full Evidence Manifest");
+            manifest->setProperty("schemaVersion", 23);
+            manifest->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
+            manifest->setProperty("evidenceFile", filename);
+            manifest->setProperty("plugin", juce::File(pluginPath).getFileNameWithoutExtension());
+            if (serialPluginPath.isNotEmpty())
+                manifest->setProperty("serialPlugin", juce::File(serialPluginPath).getFileNameWithoutExtension());
+            manifest->setProperty("sampleRate", config.sampleRate);
+            manifest->setProperty("blockSize", config.blockSize);
+            manifest->setProperty("durationSeconds", config.seconds);
+
+            juce::Array<juce::var> analyserNames;
+            for (const auto& analyser : config.analyzers)
+                analyserNames.add(analyser);
+            manifest->setProperty("analysers", analyserNames);
+
+            juce::Array<juce::var> files;
+            for (const auto& item : fullPackageFiles)
+                files.add(item);
+            files.add(filename);
+            files.add("manifest.json");
+            manifest->setProperty("files", files);
+
+            const auto manifestJson = juce::JSON::toString(juce::var(manifest), true);
+            success = outDir.getChildFile("manifest.json").replaceWithText(manifestJson);
+        }
+
+        juce::MessageManager::callAsync([this, success, filename, bytes]() {
+            runMeasurementButton.setEnabled(true);
+            exportDataButton.setEnabled(true);
+            exportEvidenceButton.setEnabled(true);
+            if (success)
+                progressLabel.setText("Exported evidence pack: " + filename + " ("
+                                      + juce::File::descriptionOfSizeInBytes(bytes) + ")",
+                                      juce::dontSendNotification);
+            else
+                showError("Failed to export evidence pack");
+        });
+    }).detach();
+}
+
 void MainComponent::exportMeasurementData()
 {
-    std::cerr << "[EXPORT] exportMeasurementData CALLED" << std::endl;
     const auto outputPath = outputPathEditor.getText().trim();
     if (outputPath.isEmpty())
     {
@@ -3046,9 +5668,26 @@ void MainComponent::exportMeasurementData()
 
     exportDataButton.setEnabled(false);
     runMeasurementButton.setEnabled(false);
-    progressLabel.setText("Exporting measurement data...", juce::dontSendNotification);
+    progressLabel.setText("Building full evidence package...", juce::dontSendNotification);
 
-    std::thread([this, outDir]() {
+    const auto pluginPath = pluginPathEditor.getText().trim();
+    auto baseName = juce::File(pluginPath).getFileNameWithoutExtension();
+    if (baseName.isEmpty())
+        baseName = "PluginDNA";
+    baseName = baseName.retainCharacters("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_ ")
+                       .trim().replaceCharacter(' ', '_');
+    const auto packageName = baseName + "_full_evidence_"
+                           + juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
+    const auto packageDir = outDir.getChildFile(packageName);
+    if (!packageDir.createDirectory())
+    {
+        runMeasurementButton.setEnabled(true);
+        exportDataButton.setEnabled(true);
+        showError("Could not create full evidence package directory");
+        return;
+    }
+
+    std::thread([this, packageDir]() {
         bool success = true;
         juce::String failedFile;
         int exportedCount = 0;
@@ -3060,7 +5699,7 @@ void MainComponent::exportMeasurementData()
 
             for (const auto& item : pendingExportDatasets)
             {
-                const auto file = outDir.getChildFile(item.filename);
+                const auto file = packageDir.getChildFile(item.filename);
                 std::ofstream out(file.getFullPathName().toStdString(),
                                   std::ios::out | std::ios::trunc);
 
@@ -3107,16 +5746,21 @@ void MainComponent::exportMeasurementData()
             }
         }
 
-        juce::MessageManager::callAsync([this, success, failedFile, exportedCount]() {
-            runMeasurementButton.setEnabled(true);
-            exportDataButton.setEnabled(true);
-
+        juce::MessageManager::callAsync([this, success, failedFile, exportedCount, packageDir]() {
             if (success)
+            {
                 progressLabel.setText(
-                    "Exported " + juce::String(exportedCount) + " data files",
+                    "Exported " + juce::String(exportedCount) + " raw data files; building compact evidence...",
                     juce::dontSendNotification);
+                exportEvidencePack(packageDir);
+            }
             else
+            {
+                runMeasurementButton.setEnabled(true);
+                exportDataButton.setEnabled(true);
+                exportEvidenceButton.setEnabled(hasPendingEvidencePack);
                 showError("Failed to export " + failedFile);
+            }
         });
     }).detach();
 }
@@ -3125,6 +5769,7 @@ void MainComponent::clearResultsSummary()
 {
     copySummaryButton.setEnabled(false);
     exportDataButton.setEnabled(false);
+    exportEvidenceButton.setEnabled(false);
     identityRoleLabel.setText("PRIMARY ROLE  waiting for complete measurement", juce::dontSendNotification);
     identityWhyLabel.setText("WHY  waiting for evidence", juce::dontSendNotification);
     identityWatchLabel.setText("WATCH OUT  waiting for evidence", juce::dontSendNotification);

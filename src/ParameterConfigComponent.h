@@ -7,7 +7,7 @@ class ParameterConfigComponent : public juce::Component,
                                  public juce::ComboBox::Listener,
                                  public juce::TextEditor::Listener {
 public:
-    ParameterConfigComponent(const juce::String& paramName);
+    ParameterConfigComponent(const juce::String& paramName, juce::AudioProcessorParameter* parameter);
     ~ParameterConfigComponent() override;
 
     void paint(juce::Graphics& g) override;
@@ -20,6 +20,7 @@ public:
 
 private:
     void updateUI();
+    void detectEnumeratedStates(juce::AudioProcessorParameter* parameter);
 
     juce::String paramName;
 

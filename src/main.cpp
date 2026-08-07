@@ -1,15 +1,15 @@
 #include "JuceHeader.h"
 #include "MainWindow.h"
 
-class PluginAnalyserApplication : public juce::JUCEApplication {
+class PluginDNAApplication : public juce::JUCEApplication {
 public:
-    PluginAnalyserApplication() {}
+    PluginDNAApplication() {}
 
     const juce::String getApplicationName() override {
-        return "Plugin Analyser";
+        return "PluginDNA";
     }
     const juce::String getApplicationVersion() override {
-        return "1.0.0";
+        return "12.1.0";
     }
     bool moreThanOneInstanceAllowed() override {
         return true;
@@ -32,4 +32,4 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
 };
 
-START_JUCE_APPLICATION(PluginAnalyserApplication)
+START_JUCE_APPLICATION(PluginDNAApplication)

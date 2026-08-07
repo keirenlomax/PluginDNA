@@ -5,7 +5,7 @@ std::unique_ptr<juce::AudioPluginInstance> loadPluginInstance(const juce::File& 
                                                               int blockSize, juce::String& errorMessageOut) {
     errorMessageOut.clear();
 
-    // VST3 plugins on macOS are bundles (directories), not files
+    // VST3 and Audio Unit plug-ins may be files or macOS bundles.
     if (!pluginFile.exists()) {
         errorMessageOut = "Plugin file does not exist: " + pluginFile.getFullPathName();
         std::cerr << errorMessageOut << std::endl;
@@ -15,7 +15,10 @@ std::unique_ptr<juce::AudioPluginInstance> loadPluginInstance(const juce::File& 
     juce::AudioPluginFormatManager formatManager;
     #if JUCE_PLUGINHOST_VST3
     formatManager.addFormat(std::make_unique<juce::VST3PluginFormat>());
-#endif
+    #endif
+    #if JUCE_PLUGINHOST_AU && JUCE_MAC
+    formatManager.addFormat(std::make_unique<juce::AudioUnitPluginFormat>());
+    #endif
 
     juce::String errorMessage;
     juce::PluginDescription description;
@@ -61,8 +64,8 @@ std::unique_ptr<juce::AudioPluginInstance> loadPluginInstance(const juce::File& 
     }
 
     if (!foundFormat) {
-        errorMessageOut = "No plugin format recognized for: " + pluginPath +
-                          "\nMake sure the file is a valid VST3 plugin bundle (.vst3 directory).";
+        errorMessageOut = "No supported plugin format recognized for: " + pluginPath +
+                          "\nSupported formats in this build: VST3 and Audio Unit.";
         std::cerr << errorMessageOut << std::endl;
         std::cerr << "Available formats: ";
         for (int i = 0; i < numFormats; ++i) {

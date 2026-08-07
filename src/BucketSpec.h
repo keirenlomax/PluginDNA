@@ -4,7 +4,7 @@
 #include <vector>
 
 struct BucketSpec {
-    enum class Strategy { ExplicitValues, Linear, Log, EdgeAndCenter };
+    enum class Strategy { ExplicitValues, Linear, Log, EdgeAndCenter, Enumerated };
 
     juce::String paramName;
     Strategy strategy;

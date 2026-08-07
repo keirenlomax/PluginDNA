@@ -90,6 +90,58 @@ ThdAnalyzer::HarmonicMeasurement ThdAnalyzer::computeHarmonics(
     }
 
     measurement.thd = std::sqrt(harmonicPowerSum);
+
+    // Classify energy that does not belong to the expected H2-H10 ladder.
+    // This catches foldback/alias products and other out-of-ladder components
+    // while the FFT buffer is still available.
+    std::vector<bool> expected(static_cast<std::size_t>(fftSize / 2), false);
+    auto markBand = [&](int centreBin)
+    {
+        for (int offset = -3; offset <= 3; ++offset)
+        {
+            const int bin = centreBin + offset;
+            if (bin > 0 && bin < fftSize / 2) expected[static_cast<std::size_t>(bin)] = true;
+        }
+    };
+    markBand(fundamentalBin);
+    for (int harmonic = 2; harmonic <= 10; ++harmonic)
+    {
+        const double rawFrequency = harmonic * fundamentalFreq;
+        const int directBin = harmonic * fundamentalBin;
+        if (directBin < fftSize / 2) markBand(directBin);
+
+        if (rawFrequency >= sampleRate * 0.5)
+        {
+            double folded = std::fmod(rawFrequency, sampleRate);
+            if (folded > sampleRate * 0.5) folded = sampleRate - folded;
+            const int foldedBin = static_cast<int>(std::round(folded / binHz));
+            if (foldedBin > 0 && foldedBin < fftSize / 2)
+            {
+                measurement.aliasPowerRatio += std::pow(bandMagnitude(foldedBin) / fundamentalMagnitude, 2.0);
+                ++measurement.foldedHarmonicCount;
+                markBand(foldedBin);
+            }
+        }
+    }
+
+    double unexpectedPower = 0.0;
+    double strongestUnexpected = 0.0;
+    int strongestBin = 0;
+    for (int bin = 1; bin < fftSize / 2; ++bin)
+    {
+        if (expected[static_cast<std::size_t>(bin)]) continue;
+        const double magnitude = std::abs(fftResult[static_cast<std::size_t>(bin)]);
+        const double ratio = magnitude / fundamentalMagnitude;
+        unexpectedPower += ratio * ratio;
+        if (ratio > strongestUnexpected) { strongestUnexpected = ratio; strongestBin = bin; }
+    }
+    measurement.unexpectedPowerRatio = std::sqrt(unexpectedPower);
+    measurement.aliasPowerRatio = std::sqrt(measurement.aliasPowerRatio);
+    measurement.aliasToHarmonicRatio = measurement.thd > 0.0
+        ? measurement.unexpectedPowerRatio / measurement.thd : 0.0;
+    measurement.strongestUnexpectedFrequencyHz = strongestBin * binHz;
+    measurement.strongestUnexpectedRatio = strongestUnexpected;
+    measurement.ladderIntegrity = 1.0 / (1.0 + measurement.aliasToHarmonicRatio);
     return measurement;
 }
 
@@ -156,6 +208,13 @@ void ThdAnalyzer::buildResult()
     result.columns.push_back("thd");
     for (int harmonic = 2; harmonic <= 10; ++harmonic)
         result.columns.push_back("h" + std::to_string(harmonic));
+    result.columns.push_back("unexpectedPowerRatio");
+    result.columns.push_back("aliasPowerRatio");
+    result.columns.push_back("aliasToHarmonicRatio");
+    result.columns.push_back("strongestUnexpectedFrequencyHz");
+    result.columns.push_back("strongestUnexpectedRatio");
+    result.columns.push_back("ladderIntegrity");
+    result.columns.push_back("foldedHarmonicCount");
 
     for (const auto& paramName : paramNames)
         result.columns.push_back(paramName.toStdString());
@@ -174,6 +233,13 @@ void ThdAnalyzer::buildResult()
             row.push_back(measurement.thd);
             for (double ratio : measurement.harmonicRatios)
                 row.push_back(ratio);
+            row.push_back(measurement.unexpectedPowerRatio);
+            row.push_back(measurement.aliasPowerRatio);
+            row.push_back(measurement.aliasToHarmonicRatio);
+            row.push_back(measurement.strongestUnexpectedFrequencyHz);
+            row.push_back(measurement.strongestUnexpectedRatio);
+            row.push_back(measurement.ladderIntegrity);
+            row.push_back(static_cast<double>(measurement.foldedHarmonicCount));
 
             for (const auto& paramName : paramNames)
             {

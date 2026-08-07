@@ -80,8 +80,7 @@ target_compile_definitions(PluginAnalyser
         JUCE_VST3_CAN_REPLACE_VST2=0
         JUCE_DISPLAY_SPLASH_SCREEN=0
         JUCE_USE_DARK_SPLASH_SCREEN=0
-        JUCE_PLUGINHOST_VST3=1
-        JUCE_PLUGINHOST_AU=0
+
 )
 
 # Add DEBUG definition for debug builds (for dev-only defaults)
@@ -100,7 +99,23 @@ target_link_libraries(PluginAnalyser
         juce::juce_gui_extra
 )
 
+if(APPLE)
+    target_link_libraries(PluginAnalyser
+        PRIVATE
+            "-framework AudioUnit"
+            "-framework CoreAudioKit"
+    )
+endif()
+
 # Set macOS bundle properties for proper app bundle with dock icon
+
+# PluginDNA host formats: VST3 and Audio Unit only.
+target_compile_definitions(PluginAnalyser PRIVATE
+    JUCE_PLUGINHOST_VST3=1
+    JUCE_PLUGINHOST_AU=1
+    JUCE_PLUGINHOST_VST=0
+)
+
 set_target_properties(PluginAnalyser PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_INFO_STRING "Plugin Analyser - VST3 Plugin Analysis Tool"
@@ -136,8 +151,7 @@ target_compile_definitions(plugin_measure_grid_cli
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
-        JUCE_PLUGINHOST_VST3=1
-        JUCE_PLUGINHOST_AU=0
+
 )
 
 target_link_libraries(plugin_measure_grid_cli
@@ -151,3 +165,9 @@ target_link_libraries(plugin_measure_grid_cli
 
 # For JSON parsing, we'll use JUCE's JSON class or add nlohmann/json
 # JUCE has built-in JSON support via juce::var and juce::JSON
+
+set_target_properties(PluginAnalyser PROPERTIES
+    OUTPUT_NAME "PluginDNA"
+    MACOSX_BUNDLE_BUNDLE_NAME "PluginDNA"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "com.komon.plugindna"
+)
