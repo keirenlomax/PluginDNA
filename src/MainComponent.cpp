@@ -4555,12 +4555,114 @@ void MainComponent::runMeasurement() {
                                                                              behaviourSummary, temporalSummary,
                                                                              fingerprintEvidence);
 
-            const auto compactSummary = juce::String("PluginDNA Summary\n\n")
-                + identitySummary.role + "\n"
-                + producerSummary.character + "\n"
-                + identitySummary.watch + "\n"
-                + levelSummary.level + "\n"
-                + producerSummary.behaviour;
+            // V21.2: practical on-screen interpretation generated from the same
+            // measured datasets used by the evidence cards.
+            const auto datasetNamed = [&completedExports](const juce::String& token) -> const MeasurementDataset*
+            {
+                for (const auto& item : completedExports)
+                    if (item.filename.containsIgnoreCase(token))
+                        return &item.dataset;
+                return nullptr;
+            };
+            const auto meanMetric = [](const MeasurementDataset* d, const juce::String& name) -> double
+            {
+                if (d == nullptr) return std::numeric_limits<double>::quiet_NaN();
+                const int c=findColumn(*d,name.toStdString()); if(c<0)return std::numeric_limits<double>::quiet_NaN();
+                double sum=0.0;int n=0;for(const auto& row:d->rows)if((std::size_t)c<row.size()&&std::isfinite(row[(std::size_t)c])){sum+=row[(std::size_t)c];++n;}
+                return n?sum/n:std::numeric_limits<double>::quiet_NaN();
+            };
+            const auto maxMetric = [](const MeasurementDataset* d, const juce::String& name) -> double
+            {
+                if(d==nullptr)return std::numeric_limits<double>::quiet_NaN();const int c=findColumn(*d,name.toStdString());if(c<0)return std::numeric_limits<double>::quiet_NaN();
+                double best=-std::numeric_limits<double>::infinity();bool have=false;for(const auto& row:d->rows)if((std::size_t)c<row.size()&&std::isfinite(row[(std::size_t)c])){best=std::max(best,row[(std::size_t)c]);have=true;}return have?best:std::numeric_limits<double>::quiet_NaN();
+            };
+            const auto dbAmp=[](double a){return 20.0*std::log10(std::max(std::abs(a),1.0e-15));};
+
+            const auto* uiThd=datasetNamed("grid_thd_sine");
+            const auto* uiRms=datasetNamed("grid_rms_peak_sine");
+            const auto* uiSweep=datasetNamed("linear_response_sweep");
+            const auto* uiAlias=datasetNamed("grid_alias_stress");
+            const auto* uiNoise=datasetNamed("grid_silence_dna");
+            const auto* uiStereo=datasetNamed("grid_stereo_dna");
+            const auto* uiEnv=datasetNamed("grid_envelope_dna");
+            const auto* uiHyst=datasetNamed("grid_hysteresis_dna");
+            const auto* uiTruePeak=datasetNamed("grid_truepeak_dna");
+            const auto* uiInteraction=datasetNamed("grid_interaction_dna");
+
+            const double uh2=meanMetric(uiThd,"h2"),uh3=meanMetric(uiThd,"h3"),uh4=meanMetric(uiThd,"h4"),uh5=meanMetric(uiThd,"h5");
+            const double evenP=(std::isfinite(uh2)?uh2*uh2:0.0)+(std::isfinite(uh4)?uh4*uh4:0.0);
+            const double oddP=(std::isfinite(uh3)?uh3*uh3:0.0)+(std::isfinite(uh5)?uh5*uh5:0.0);
+            juce::String uiHarmonic="MIXED HARMONICS";
+            if(oddP>evenP*2.5)uiHarmonic="ODD-DOMINANT";
+            else if(evenP>oddP*2.5)uiHarmonic="EVEN-DOMINANT";
+
+            double uiCrest=std::numeric_limits<double>::quiet_NaN();
+            if(uiRms)
+            {
+                const int ri=findColumn(*uiRms,"rmsInL"),ro=findColumn(*uiRms,"rmsOutL"),pi=findColumn(*uiRms,"peakInL"),po=findColumn(*uiRms,"peakOutL");
+                double sum=0;int n=0;if(ri>=0&&ro>=0&&pi>=0&&po>=0)for(const auto& row:uiRms->rows)if((std::size_t)std::max({ri,ro,pi,po})<row.size())
+                {const double a=dbAmp(row[(std::size_t)pi]/std::max(std::abs(row[(std::size_t)ri]),1e-15));const double b=dbAmp(row[(std::size_t)po]/std::max(std::abs(row[(std::size_t)ro]),1e-15));if(std::isfinite(a)&&std::isfinite(b)){sum+=b-a;++n;}}
+                if(n)uiCrest=sum/n;
+            }
+            juce::String uiDynamics="PRESERVES TRANSIENTS";
+            if(std::isfinite(uiCrest)){if(uiCrest<-1.0)uiDynamics="NOTICEABLE PEAK CONTROL";else if(uiCrest<-0.25)uiDynamics="GENTLE PEAK CONTROL";else if(uiCrest>0.5)uiDynamics="INCREASES TRANSIENT CONTRAST";}
+
+            juce::String uiTone="BROADLY NEUTRAL";
+            if(uiSweep)
+            {
+                const int fc=findColumn(*uiSweep,"freqHz"),mc=findColumn(*uiSweep,"magDb");
+                auto band=[&](double lo,double hi){double sum=0;int n=0;if(fc<0||mc<0)return std::numeric_limits<double>::quiet_NaN();for(const auto& row:uiSweep->rows)if((std::size_t)std::max(fc,mc)<row.size()){const double f=row[(std::size_t)fc],m=row[(std::size_t)mc];if(f>=lo&&f<=hi&&std::isfinite(m)){sum+=m;++n;}}return n?sum/n:std::numeric_limits<double>::quiet_NaN();};
+                const double lo=band(40,150),mid=band(500,2000),hi=band(10000,20000);
+                if(std::isfinite(lo)&&std::isfinite(mid)&&std::isfinite(hi)){const double ld=lo-mid,hd=hi-mid;if(ld>0.75&&hd<-0.75)uiTone="WARMER / DARKER TILT";else if(hd>0.75)uiTone="BRIGHTER TILT";else if(hd<-0.75)uiTone="SOFTER TOP END";else if(ld>0.75)uiTone="ADDS LOW-END WEIGHT";}
+            }
+
+            const double uiWorstAlias=maxMetric(uiAlias,"aliasPowerDb");
+            const double uiWorstImd=maxMetric(uiInteraction,"magDbRelativeToInput");
+            const double uiSelfNoise=maxMetric(uiNoise,"outputRmsDbFS");
+            const double uiAttack=maxMetric(uiEnv,"attackMs");
+            const double uiRelease=maxMetric(uiEnv,"releaseMs");
+            const double uiHysteresis=std::abs(maxMetric(uiHyst,"hysteresisDb"));
+            const double uiTP=maxMetric(uiTruePeak,"truePeakDbTP");
+            const double uiTPOvershoot=maxMetric(uiTruePeak,"intersampleOvershootDb");
+            const double uiLeak=std::max(maxMetric(uiStereo,"leftOnlyLeakDb"),maxMetric(uiStereo,"rightOnlyLeakDb"));
+
+            juce::String uiClean="VERY CLEAN";
+            if((std::isfinite(uiWorstAlias)&&uiWorstAlias>-60)||(std::isfinite(uiWorstImd)&&uiWorstImd>-40))uiClean="STRONG NONLINEAR BY-PRODUCTS";
+            else if((std::isfinite(uiWorstAlias)&&uiWorstAlias>-90)||(std::isfinite(uiWorstImd)&&uiWorstImd>-60))uiClean="MODERATE NONLINEAR BY-PRODUCTS";
+
+            juce::String uiStereoText=(!std::isfinite(uiLeak)||uiLeak<-70)?"STEREO IMAGE PRESERVED":"MEASURABLE CROSSTALK";
+            juce::String uiMemory=(!std::isfinite(uiHysteresis)||uiHysteresis<0.05)?"NEGLIGIBLE MEMORY":"STATE / HISTORY DEPENDENT";
+            juce::String uiWatch="NO MAJOR TECHNICAL WARNING";
+            juce::StringArray warnings;
+            if(std::isfinite(uiWorstAlias)&&uiWorstAlias>-90)warnings.add("aliasing rises when driven");
+            if(std::isfinite(uiTPOvershoot)&&uiTPOvershoot>0.2)warnings.add("watch intersample peaks");
+            if(std::isfinite(uiSelfNoise)&&uiSelfNoise>-100)warnings.add("adds measurable idle noise");
+            if(!warnings.isEmpty())uiWatch=warnings.joinIntoString(" · ").toUpperCase();
+
+            // Relative drive-map summary for first character/heavy regions.
+            juce::String uiCharacter="not detected",uiHeavy="not detected";
+            if(!config.parameterBuckets.empty()&&uiThd&&uiRms)
+            {
+                const int tr=findColumn(*uiThd,"runId"),tc=findColumn(*uiThd,"thd");
+                const int rr=findColumn(*uiRms,"runId"),ri=findColumn(*uiRms,"rmsInL"),ro=findColumn(*uiRms,"rmsOutL"),rp=findColumn(*uiRms,"peakInL"),rq=findColumn(*uiRms,"peakOutL");
+                std::map<int,double> td,cr;
+                if(tr>=0&&tc>=0)for(const auto& row:uiThd->rows)if((std::size_t)std::max(tr,tc)<row.size())td[(int)std::llround(row[(std::size_t)tr])]=std::max(td[(int)std::llround(row[(std::size_t)tr])],row[(std::size_t)tc]);
+                if(rr>=0&&ri>=0&&ro>=0&&rp>=0&&rq>=0)for(const auto& row:uiRms->rows)if((std::size_t)std::max({rr,ri,ro,rp,rq})<row.size()){const int id=(int)std::llround(row[(std::size_t)rr]);cr[id]=dbAmp(row[(std::size_t)rq]/std::max(std::abs(row[(std::size_t)ro]),1e-15))-dbAmp(row[(std::size_t)rp]/std::max(std::abs(row[(std::size_t)ri]),1e-15));}
+                int run=0;std::function<void(int,juce::StringArray)> walk;walk=[&](int idx,juce::StringArray setting){
+                    if(idx>=(int)config.parameterBuckets.size()){for(std::size_t gi=0;gi<config.inputGainBucketsDb.size();++gi,++run){const int base=(int)gi;double score=0;auto a=td.find(run),b=td.find(base);if(a!=td.end()&&b!=td.end()&&a->second>0&&b->second>0){double d=dbAmp(a->second)-dbAmp(b->second);if(d>3)score+=1;if(d>9)score+=1;}auto ca=cr.find(run),cb=cr.find(base);if(ca!=cr.end()&&cb!=cr.end()){double d=std::abs(ca->second-cb->second);if(d>0.25)score+=1;if(d>1.25)score+=1;}juce::String here=setting.joinIntoString(", ")+" @ "+juce::String(config.inputGainBucketsDb[gi],1)+" dBFS";if(score>=1.5&&uiCharacter=="not detected")uiCharacter=here;if(score>=4.0&&uiHeavy=="not detected")uiHeavy=here;}return;}
+                    const auto& b=config.parameterBuckets[(std::size_t)idx];const auto vals=generatedBucketValues(b);for(const auto& v:vals){auto n=setting;n.add(b.paramName.fromFirstOccurrenceOf("::",false,false)+" "+juce::String((double)v,2));walk(idx+1,n);}};
+                walk(0,{});
+            }
+
+            const auto compactSummary = juce::String("PluginDNA Summary\\n\\n")
+                + identitySummary.role + "\\n"
+                + "CHARACTER  " + uiHarmonic + " · " + uiTone + " · " + uiDynamics + "\\n"
+                + "CLEANLINESS  " + uiClean + "\\n"
+                + "STEREO  " + uiStereoText + "\\n"
+                + "MEMORY  " + uiMemory + "\\n"
+                + "CHARACTER STARTS  " + uiCharacter + "\\n"
+                + "HEAVY STARTS  " + uiHeavy + "\\n"
+                + "WATCH OUT  " + uiWatch;
 
             {
                 std::lock_guard<std::mutex> lock(pendingExportMutex);
@@ -4570,23 +4672,22 @@ void MainComponent::runMeasurement() {
                 hasPendingEvidencePack = true;
             }
 
-            juce::MessageManager::callAsync([this, identitySummary, producerSummary, levelSummary]() {
-                progressLabel.setText(
-                    "Measurement complete",
-                    juce::dontSendNotification);
+            juce::MessageManager::callAsync([this, identitySummary, uiHarmonic, uiTone, uiDynamics, uiClean, uiStereoText, uiMemory, uiWatch, uiCharacter, uiHeavy,
+                                                uiWorstAlias, uiWorstImd, uiSelfNoise, uiAttack, uiRelease, uiTP, uiTPOvershoot]() {
+                progressLabel.setText("Measurement complete", juce::dontSendNotification);
                 identityRoleLabel.setText(identitySummary.role, juce::dontSendNotification);
-                identityWhyLabel.setText(producerSummary.character, juce::dontSendNotification);
-                identityWatchLabel.setText(identitySummary.watch, juce::dontSendNotification);
-                levelSummaryLabel.setText(levelSummary.level, juce::dontSendNotification);
-                peakSummaryLabel.setText({}, juce::dontSendNotification);
-                dynamicsSummaryLabel.setText({}, juce::dontSendNotification);
-                harmonicSummaryLabel.setText(producerSummary.behaviour, juce::dontSendNotification);
-                harmonicBalanceLabel.setText({}, juce::dontSendNotification);
-                harmonicGrowthLabel.setText({}, juce::dontSendNotification);
-                toneBassLabel.setText({}, juce::dontSendNotification);
-                toneMidLabel.setText({}, juce::dontSendNotification);
-                toneTrebleLabel.setText({}, juce::dontSendNotification);
-                toneLargestLabel.setText({}, juce::dontSendNotification);
+                identityWhyLabel.setText("CHARACTER  " + uiHarmonic + " · " + uiTone, juce::dontSendNotification);
+                identityWatchLabel.setText("WATCH OUT  " + uiWatch, juce::dontSendNotification);
+                levelSummaryLabel.setText("DYNAMICS  " + uiDynamics, juce::dontSendNotification);
+                peakSummaryLabel.setText("CLEANLINESS  " + uiClean, juce::dontSendNotification);
+                dynamicsSummaryLabel.setText("STEREO  " + uiStereoText + " · MEMORY  " + uiMemory, juce::dontSendNotification);
+                harmonicSummaryLabel.setText("CHARACTER STARTS  " + uiCharacter, juce::dontSendNotification);
+                harmonicBalanceLabel.setText("HEAVY STARTS  " + uiHeavy, juce::dontSendNotification);
+                harmonicGrowthLabel.setText(std::isfinite(uiWorstAlias) ? "WORST ALIAS  " + juce::String(uiWorstAlias,1) + " dB" : juce::String(), juce::dontSendNotification);
+                toneBassLabel.setText(std::isfinite(uiWorstImd) ? "WORST IMD PRODUCT  " + juce::String(uiWorstImd,1) + " dB" : juce::String(), juce::dontSendNotification);
+                toneMidLabel.setText(std::isfinite(uiSelfNoise) ? "SELF-NOISE  " + juce::String(uiSelfNoise,1) + " dBFS" : juce::String(), juce::dontSendNotification);
+                toneTrebleLabel.setText((std::isfinite(uiAttack)||std::isfinite(uiRelease)) ? "ENVELOPE  attack " + juce::String(uiAttack,3) + " ms · release " + juce::String(uiRelease,3) + " ms" : juce::String(), juce::dontSendNotification);
+                toneLargestLabel.setText(std::isfinite(uiTP) ? "TRUE PEAK  " + juce::String(uiTP,2) + " dBTP · overshoot " + juce::String(uiTPOvershoot,2) + " dB" : juce::String(), juce::dontSendNotification);
                 behaviourSummaryLabel.setText({}, juce::dontSendNotification);
                 behaviourChangesLabel.setText({}, juce::dontSendNotification);
                 operatingRangeLabel.setText({}, juce::dontSendNotification);
@@ -4741,7 +4842,7 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
     std::thread([this, outDir, config, summary, datasets = std::move(datasets), fullPackageFiles, pluginPath, pluginInfo, serialPluginPath, serialPluginInfo, additionalPluginPaths, additionalPluginInfos, exportingFullPackage]() mutable {
         auto* root = new juce::DynamicObject();
         root->setProperty("schema", "PluginDNA Evidence Pack");
-        root->setProperty("schemaVersion", 27);
+        root->setProperty("schemaVersion", 28);
         root->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
 
         const juce::File pluginFile(pluginPath);
@@ -6305,7 +6406,7 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
         {
             auto* manifest = new juce::DynamicObject();
             manifest->setProperty("schema", "PluginDNA Full Evidence Manifest");
-            manifest->setProperty("schemaVersion", 27);
+            manifest->setProperty("schemaVersion", 28);
             manifest->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
             manifest->setProperty("evidenceFile", filename);
             manifest->setProperty("plugin", juce::File(pluginPath).getFileNameWithoutExtension());
@@ -6471,18 +6572,18 @@ void MainComponent::clearResultsSummary()
     exportDataButton.setEnabled(false);
     exportEvidenceButton.setEnabled(false);
     identityRoleLabel.setText("PRIMARY ROLE  waiting for complete measurement", juce::dontSendNotification);
-    identityWhyLabel.setText("WHY  waiting for evidence", juce::dontSendNotification);
+    identityWhyLabel.setText("CHARACTER  waiting for evidence", juce::dontSendNotification);
     identityWatchLabel.setText("WATCH OUT  waiting for evidence", juce::dontSendNotification);
-    levelSummaryLabel.setText("LEVEL MATCH  waiting for measurement", juce::dontSendNotification);
-    peakSummaryLabel.setText("TRANSIENT IMPACT  waiting for measurement", juce::dontSendNotification);
-    dynamicsSummaryLabel.setText("DYNAMIC RANGE  waiting for measurement", juce::dontSendNotification);
-    harmonicSummaryLabel.setText("HARMONIC DNA  waiting for sine measurement", juce::dontSendNotification);
-    harmonicBalanceLabel.setText("BALANCE  waiting for harmonic measurement", juce::dontSendNotification);
-    harmonicGrowthLabel.setText("WHEN PUSHED  waiting for harmonic measurement", juce::dontSendNotification);
-    toneBassLabel.setText("TONE SHAPE  waiting for linear response measurement", juce::dontSendNotification);
-    toneMidLabel.setText("LOW END  waiting for linear response measurement", juce::dontSendNotification);
-    toneTrebleLabel.setText("HIGH END  waiting for linear response measurement", juce::dontSendNotification);
-    toneLargestLabel.setText("STRONGEST FEATURE  waiting for linear response measurement", juce::dontSendNotification);
+    levelSummaryLabel.setText("DYNAMICS  waiting for measurement", juce::dontSendNotification);
+    peakSummaryLabel.setText("CLEANLINESS  waiting for measurement", juce::dontSendNotification);
+    dynamicsSummaryLabel.setText("STEREO / MEMORY  waiting for measurement", juce::dontSendNotification);
+    harmonicSummaryLabel.setText("CHARACTER STARTS  waiting for measurement", juce::dontSendNotification);
+    harmonicBalanceLabel.setText("HEAVY STARTS  waiting for measurement", juce::dontSendNotification);
+    harmonicGrowthLabel.setText("WORST ALIAS  waiting for measurement", juce::dontSendNotification);
+    toneBassLabel.setText("WORST IMD  waiting for measurement", juce::dontSendNotification);
+    toneMidLabel.setText("SELF-NOISE  waiting for measurement", juce::dontSendNotification);
+    toneTrebleLabel.setText("ENVELOPE  waiting for measurement", juce::dontSendNotification);
+    toneLargestLabel.setText("TRUE PEAK  waiting for measurement", juce::dontSendNotification);
     behaviourSummaryLabel.setText("BEHAVIOUR  waiting for matched input levels", juce::dontSendNotification);
     behaviourChangesLabel.setText("CHANGES WITH DRIVE  waiting for measurement", juce::dontSendNotification);
     operatingRangeLabel.setText("OPERATING RANGE  waiting for stress levels", juce::dontSendNotification);
