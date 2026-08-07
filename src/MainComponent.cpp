@@ -4741,7 +4741,7 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
     std::thread([this, outDir, config, summary, datasets = std::move(datasets), fullPackageFiles, pluginPath, pluginInfo, serialPluginPath, serialPluginInfo, additionalPluginPaths, additionalPluginInfos, exportingFullPackage]() mutable {
         auto* root = new juce::DynamicObject();
         root->setProperty("schema", "PluginDNA Evidence Pack");
-        root->setProperty("schemaVersion", 25);
+        root->setProperty("schemaVersion", 27);
         root->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
 
         const juce::File pluginFile(pluginPath);
@@ -5470,6 +5470,275 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
             root->setProperty("behaviourDNA", juce::var(behaviourDna));
         }
 
+
+        // V21 Interpretation Engine: translate measurements into practical engineer/producer decisions.
+        {
+            const auto findDatasetByName = [&datasets](const juce::String& token) -> const MeasurementDataset*
+            {
+                for (const auto& item : datasets)
+                    if (item.filename.containsIgnoreCase(token))
+                        return &item.dataset;
+                return nullptr;
+            };
+            const auto colIndex = [](const MeasurementDataset& d, const juce::String& name)
+            {
+                return findColumn(d, name.toStdString());
+            };
+            const auto meanFor = [&](const MeasurementDataset* d, const juce::String& name) -> double
+            {
+                if (d == nullptr) return std::numeric_limits<double>::quiet_NaN();
+                const int c = colIndex(*d, name);
+                if (c < 0) return std::numeric_limits<double>::quiet_NaN();
+                double sum=0.0; int count=0;
+                for (const auto& row : d->rows)
+                    if (static_cast<std::size_t>(c)<row.size() && std::isfinite(row[(std::size_t)c]))
+                    { sum+=row[(std::size_t)c]; ++count; }
+                return count?sum/count:std::numeric_limits<double>::quiet_NaN();
+            };
+            const auto maxFor = [&](const MeasurementDataset* d, const juce::String& name) -> double
+            {
+                if (d == nullptr) return std::numeric_limits<double>::quiet_NaN();
+                const int c=colIndex(*d,name); double best=-std::numeric_limits<double>::infinity(); bool have=false;
+                if(c<0)return std::numeric_limits<double>::quiet_NaN();
+                for(const auto& row:d->rows) if((std::size_t)c<row.size()&&std::isfinite(row[(std::size_t)c])){best=std::max(best,row[(std::size_t)c]);have=true;}
+                return have?best:std::numeric_limits<double>::quiet_NaN();
+            };
+            const auto minFor = [&](const MeasurementDataset* d, const juce::String& name) -> double
+            {
+                if (d == nullptr) return std::numeric_limits<double>::quiet_NaN();
+                const int c=colIndex(*d,name); double best=std::numeric_limits<double>::infinity(); bool have=false;
+                if(c<0)return std::numeric_limits<double>::quiet_NaN();
+                for(const auto& row:d->rows) if((std::size_t)c<row.size()&&std::isfinite(row[(std::size_t)c])){best=std::min(best,row[(std::size_t)c]);have=true;}
+                return have?best:std::numeric_limits<double>::quiet_NaN();
+            };
+            const auto dbOf = [](double a){ return 20.0*std::log10(std::max(a,1.0e-15)); };
+
+            const auto* thd=findDatasetByName("grid_thd_sine");
+            const auto* rms=findDatasetByName("grid_rms_peak_sine");
+            const auto* sweep=findDatasetByName("linear_response_sweep");
+            const auto* alias=findDatasetByName("grid_alias_stress");
+            const auto* noise=findDatasetByName("grid_silence_dna");
+            const auto* stereo=findDatasetByName("grid_stereo_dna");
+            const auto* summing=findDatasetByName("grid_summing_dna");
+            const auto* envelope=findDatasetByName("grid_envelope_dna");
+            const auto* hysteresis=findDatasetByName("grid_hysteresis_dna");
+            const auto* truepeak=findDatasetByName("grid_truepeak_dna");
+            const auto* interaction=findDatasetByName("grid_interaction_dna");
+
+            double h2=meanFor(thd,"h2"), h3=meanFor(thd,"h3"), h4=meanFor(thd,"h4"), h5=meanFor(thd,"h5");
+            double evenPower=(std::isfinite(h2)?h2*h2:0.0)+(std::isfinite(h4)?h4*h4:0.0);
+            double oddPower=(std::isfinite(h3)?h3*h3:0.0)+(std::isfinite(h5)?h5*h5:0.0);
+            juce::String harmonicCharacter="mixed";
+            if(oddPower>evenPower*2.5) harmonicCharacter="odd-dominant";
+            else if(evenPower>oddPower*2.5) harmonicCharacter="even-dominant";
+
+            double crestChange=std::numeric_limits<double>::quiet_NaN();
+            if(rms)
+            {
+                const int rin=colIndex(*rms,"rmsInL"), rout=colIndex(*rms,"rmsOutL"), pin=colIndex(*rms,"peakInL"), pout=colIndex(*rms,"peakOutL");
+                std::vector<double> changes;
+                if(rin>=0&&rout>=0&&pin>=0&&pout>=0)
+                    for(const auto& row:rms->rows)
+                        if((std::size_t)std::max({rin,rout,pin,pout})<row.size())
+                        {
+                            const double ci=dbOf(std::abs(row[(std::size_t)pin])/std::max(std::abs(row[(std::size_t)rin]),1.0e-15));
+                            const double co=dbOf(std::abs(row[(std::size_t)pout])/std::max(std::abs(row[(std::size_t)rout]),1.0e-15));
+                            if(std::isfinite(ci)&&std::isfinite(co))changes.push_back(co-ci);
+                        }
+                if(!changes.empty()) crestChange=std::accumulate(changes.begin(),changes.end(),0.0)/changes.size();
+            }
+
+            double lowTone=0.0, highTone=0.0; bool haveTone=false;
+            if(sweep)
+            {
+                const int fc=colIndex(*sweep,"freqHz"), mc=colIndex(*sweep,"magDb");
+                auto bandMean=[&](double lo,double hi){double sum=0;int n=0;if(fc<0||mc<0)return std::numeric_limits<double>::quiet_NaN();for(const auto& row:sweep->rows)if((std::size_t)std::max(fc,mc)<row.size()){double f=row[(std::size_t)fc],m=row[(std::size_t)mc];if(f>=lo&&f<=hi&&std::isfinite(m)){sum+=m;++n;}}return n?sum/n:std::numeric_limits<double>::quiet_NaN();};
+                const double low=bandMean(40,150), mid=bandMean(500,2000), high=bandMean(10000,20000);
+                if(std::isfinite(low)&&std::isfinite(mid)&&std::isfinite(high)){lowTone=low-mid;highTone=high-mid;haveTone=true;}
+            }
+
+            const double worstAlias=maxFor(alias,"aliasPowerDb");
+            const double selfNoise=maxFor(noise,"outputRmsDbFS");
+            const double maxHysteresis=std::max(std::abs(maxFor(hysteresis,"hysteresisDb")),std::abs(minFor(hysteresis,"hysteresisDb")));
+            const double attack=maxFor(envelope,"attackMs"), release=maxFor(envelope,"releaseMs");
+            const double truePeak=maxFor(truepeak,"truePeakDbTP"), truePeakOver=maxFor(truepeak,"intersampleOvershootDb");
+            const double stereoLeak=std::max(maxFor(stereo,"leftOnlyLeakDb"),maxFor(stereo,"rightOnlyLeakDb"));
+            const double summingResidual=maxFor(summing,"interactionResidualDbRelative");
+            const double worstImd=maxFor(interaction,"magDbRelativeToInput");
+
+            juce::String dynamics="largely preserves crest";
+            if(std::isfinite(crestChange)){ if(crestChange<-1.0)dynamics="noticeably softens peaks"; else if(crestChange<-0.25)dynamics="gently controls peaks"; else if(crestChange>0.5)dynamics="increases crest / transient contrast"; }
+            juce::String tone="broadly neutral";
+            if(haveTone){if(lowTone>0.75&&highTone<-0.75)tone="tilts warmer/darker";else if(highTone>0.75)tone="tilts brighter";else if(highTone<-0.75)tone="softens the top end";else if(lowTone>0.75)tone="adds low-end weight";}
+            juce::String cleanliness="very clean";
+            if((std::isfinite(worstAlias)&&worstAlias>-60.0)||(std::isfinite(worstImd)&&worstImd>-40.0))cleanliness="strong nonlinear by-products";
+            else if((std::isfinite(worstAlias)&&worstAlias>-90.0)||(std::isfinite(worstImd)&&worstImd>-60.0))cleanliness="moderate nonlinear by-products";
+            juce::String stereoText="stereo image preserved";
+            if(std::isfinite(stereoLeak)&&stereoLeak>-70.0)stereoText="measurable channel crosstalk";
+            juce::String memoryText=(!std::isfinite(maxHysteresis)||maxHysteresis<0.05)?"negligible memory/hysteresis":"state/history dependent";
+
+            auto* engineer=new juce::DynamicObject();
+            engineer->setProperty("harmonicBalance",harmonicCharacter);
+            engineer->setProperty("meanCrestChangeDb",crestChange);
+            engineer->setProperty("tone",tone);
+            engineer->setProperty("worstAliasDb",worstAlias);
+            engineer->setProperty("worstInteractionProductDb",worstImd);
+            engineer->setProperty("selfNoiseRmsDbFS",selfNoise);
+            engineer->setProperty("maximumHysteresisDb",maxHysteresis);
+            engineer->setProperty("slowestAttackMs",attack);
+            engineer->setProperty("slowestReleaseMs",release);
+            engineer->setProperty("maximumTruePeakDbTP",truePeak);
+            engineer->setProperty("maximumIntersampleOvershootDb",truePeakOver);
+            engineer->setProperty("worstStereoLeakDb",stereoLeak);
+            engineer->setProperty("worstSummingResidualDb",summingResidual);
+            root->setProperty("engineerCard",juce::var(engineer));
+
+            auto* producer=new juce::DynamicObject();
+                        juce::String measuredRole="Measured audio processor";
+            for (const auto& line : juce::StringArray::fromLines(summary))
+                if (line.startsWithIgnoreCase("PRIMARY ROLE")) { measuredRole=line.fromFirstOccurrenceOf("PRIMARY ROLE",false,false).trim(); break; }
+            producer->setProperty("role", measuredRole);
+            producer->setProperty("character", harmonicCharacter+" · "+tone+" · "+dynamics);
+            producer->setProperty("dynamics",dynamics);
+            producer->setProperty("tone",tone);
+            producer->setProperty("cleanliness",cleanliness);
+            producer->setProperty("stereo",stereoText);
+            producer->setProperty("memory",memoryText);
+            juce::String watch;
+            if(std::isfinite(worstAlias)&&worstAlias>-90.0)watch+="aliasing rises when driven; ";
+            if(std::isfinite(truePeakOver)&&truePeakOver>0.2)watch+="watch intersample peaks; ";
+            if(std::isfinite(selfNoise)&&selfNoise>-100.0)watch+="adds measurable idle noise; ";
+            if(watch.isEmpty())watch="no major technical warning in the measured range";
+            else watch=watch.trimCharactersAtEnd("; ");
+            producer->setProperty("watchOut",watch);
+            producer->setProperty("interpretationPolicy","deterministic measured rules; descriptive, not a quality judgement");
+            root->setProperty("producerCard",juce::var(producer));
+
+            // Drive Map: classify each parameter x input-level operating point from measured nonlinear activity.
+            juce::Array<juce::var> driveMaps;
+            if(!config.parameterBuckets.empty())
+            {
+                const auto* t=thd; const auto* a=alias; const auto* r=rms; const auto* imd=interaction;
+                const int trun=t?colIndex(*t,"runId"):-1, tthd=t?colIndex(*t,"thd"):-1;
+                const int arun=a?colIndex(*a,"runId"):-1, adb=a?colIndex(*a,"aliasPowerDb"):-1;
+                const int rrun=r?colIndex(*r,"runId"):-1, rri=r?colIndex(*r,"rmsInL"):-1, rro=r?colIndex(*r,"rmsOutL"):-1, rpi=r?colIndex(*r,"peakInL"):-1, rpo=r?colIndex(*r,"peakOutL"):-1;
+                const int irun=imd?colIndex(*imd,"runId"):-1, imag=imd?colIndex(*imd,"magDbRelativeToInput"):-1;
+                std::map<int,double> thdByRun,aliasByRun,crestByRun,imdByRun;
+                if(t&&trun>=0&&tthd>=0)for(const auto& row:t->rows)if((std::size_t)std::max(trun,tthd)<row.size())thdByRun[(int)std::llround(row[(std::size_t)trun])]=std::max(thdByRun[(int)std::llround(row[(std::size_t)trun])],row[(std::size_t)tthd]);
+                if(a&&arun>=0&&adb>=0)for(const auto& row:a->rows)if((std::size_t)std::max(arun,adb)<row.size()){int id=(int)std::llround(row[(std::size_t)arun]);auto it=aliasByRun.find(id);aliasByRun[id]=it==aliasByRun.end()?row[(std::size_t)adb]:std::max(it->second,row[(std::size_t)adb]);}
+                if(r&&rrun>=0&&rri>=0&&rro>=0&&rpi>=0&&rpo>=0)for(const auto& row:r->rows)if((std::size_t)std::max({rrun,rri,rro,rpi,rpo})<row.size()){int id=(int)std::llround(row[(std::size_t)rrun]);double ci=dbOf(std::abs(row[(std::size_t)rpi])/std::max(std::abs(row[(std::size_t)rri]),1e-15));double co=dbOf(std::abs(row[(std::size_t)rpo])/std::max(std::abs(row[(std::size_t)rro]),1e-15));crestByRun[id]=co-ci;}
+                if(imd&&irun>=0&&imag>=0)for(const auto& row:imd->rows)if((std::size_t)std::max(irun,imag)<row.size()){int id=(int)std::llround(row[(std::size_t)irun]);auto it=imdByRun.find(id);imdByRun[id]=it==imdByRun.end()?row[(std::size_t)imag]:std::max(it->second,row[(std::size_t)imag]);}
+
+                // Run ordering mirrors buildRunGrid: parameter combinations first, then input levels.
+                int runId=0;
+                std::function<void(int,std::map<juce::String,double>)> walk;
+                walk=[&](int idx,std::map<juce::String,double> settings)
+                {
+                    if(idx>=(int)config.parameterBuckets.size())
+                    {
+                        for(double gain:config.inputGainBucketsDb)
+                        {
+                            // Relative Drive Map v2:
+                            // compare this operating point against the plugin's own baseline
+                            // (first parameter combination at the same input level). This avoids
+                            // classifying a plugin's inherent/default behaviour as "heavy".
+                            const int inputIndex = (int)std::distance(config.inputGainBucketsDb.begin(),
+                                std::find_if(config.inputGainBucketsDb.begin(), config.inputGainBucketsDb.end(),
+                                    [&](float g){ return std::abs((double)g-gain)<0.001; }));
+                            const int baselineRunId = inputIndex >= 0 ? inputIndex : 0;
+
+                            const auto metricDelta = [](const std::map<int,double>& m, int id, int baseId) -> double
+                            {
+                                const auto a=m.find(id), b=m.find(baseId);
+                                if(a==m.end()||b==m.end()||!std::isfinite(a->second)||!std::isfinite(b->second))
+                                    return 0.0;
+                                return a->second-b->second;
+                            };
+
+                            double score=0.0;
+                            double thdDeltaDb=0.0, aliasDeltaDb=0.0, crestDeltaDb=0.0, imdDeltaDb=0.0;
+
+                            auto ti=thdByRun.find(runId), tb=thdByRun.find(baselineRunId);
+                            if(ti!=thdByRun.end()&&tb!=thdByRun.end()&&ti->second>0.0&&tb->second>0.0)
+                            {
+                                thdDeltaDb=dbOf(ti->second)-dbOf(tb->second);
+                                if(thdDeltaDb>3.0)score+=1.0;
+                                if(thdDeltaDb>9.0)score+=1.0;
+                            }
+
+                            aliasDeltaDb=metricDelta(aliasByRun,runId,baselineRunId);
+                            if(aliasDeltaDb>6.0)score+=0.75;
+                            if(aliasDeltaDb>18.0)score+=0.75;
+
+                            crestDeltaDb=metricDelta(crestByRun,runId,baselineRunId);
+                            if(std::abs(crestDeltaDb)>0.25)score+=1.0;
+                            if(std::abs(crestDeltaDb)>1.25)score+=1.0;
+
+                            imdDeltaDb=metricDelta(imdByRun,runId,baselineRunId);
+                            if(imdDeltaDb>6.0)score+=0.75;
+                            if(imdDeltaDb>18.0)score+=0.75;
+
+                            // Absolute guardrails only promote genuinely extreme states.
+                            auto ai=aliasByRun.find(runId); if(ai!=aliasByRun.end()&&ai->second>-45.0)score+=0.5;
+                            auto ii=imdByRun.find(runId); if(ii!=imdByRun.end()&&ii->second>-30.0)score+=0.5;
+
+                            juce::String region=score<1.5?"light":score<4.0?"character":"heavy";
+                            auto* cell=new juce::DynamicObject();
+                            cell->setProperty("runId",runId);
+                            cell->setProperty("inputGainDb",gain);
+                            cell->setProperty("activityScore",score);
+                            cell->setProperty("region",region);
+                            cell->setProperty("baselineRunId",baselineRunId);
+                            cell->setProperty("thdDeltaDb",thdDeltaDb);
+                            cell->setProperty("aliasDeltaDb",aliasDeltaDb);
+                            cell->setProperty("crestDeltaDb",crestDeltaDb);
+                            cell->setProperty("imdDeltaDb",imdDeltaDb);
+                            auto* setObj=new juce::DynamicObject();for(const auto& kv:settings)setObj->setProperty(kv.first,kv.second);cell->setProperty("parameters",juce::var(setObj));
+                            driveMaps.add(juce::var(cell)); ++runId;
+                        }
+                        return;
+                    }
+                    const auto& b=config.parameterBuckets[(std::size_t)idx]; const auto vals=generatedBucketValues(b);
+                    for(const auto& v:vals){auto next=settings;next[b.paramName]=(double)v;walk(idx+1,next);}
+                };
+                walk(0,{});
+            }
+            auto* mapObj=new juce::DynamicObject();
+            mapObj->setProperty("version",2);
+            mapObj->setProperty("regions","light < 1.5; character 1.5-3.99; heavy >= 4 relative activity points");
+            mapObj->setProperty("policy","relative activity score compares THD, alias, crest and IMD against the plugin default/first-parameter baseline at the same input level; absolute guardrails only flag extreme states; this is a usage-intensity map, not a quality score");
+            mapObj->setProperty("cells",driveMaps);
+            juce::String firstCharacter;
+            for (const auto& cellVar : driveMaps)
+            {
+                auto* cell=cellVar.getDynamicObject(); if(cell==nullptr)continue;
+                if(cell->getProperty("region").toString()!="character")continue;
+                juce::StringArray pieces;
+                if(auto* po=cell->getProperty("parameters").getDynamicObject())
+                    for(int i=0;i<po->getProperties().size();++i)
+                        pieces.add(po->getProperties().getName(i).toString()+"="+juce::String((double)po->getProperties().getValueAt(i),3));
+                pieces.add("input="+juce::String((double)cell->getProperty("inputGainDb"),1)+" dBFS");
+                firstCharacter=pieces.joinIntoString(", "); break;
+            }
+            mapObj->setProperty("firstCharacterOperatingPoint",firstCharacter.isNotEmpty()?firstCharacter:"none detected in tested grid");
+            juce::String firstHeavy;
+            for (const auto& cellVar : driveMaps)
+            {
+                auto* cell=cellVar.getDynamicObject(); if(cell==nullptr)continue;
+                if(cell->getProperty("region").toString()!="heavy")continue;
+                juce::StringArray pieces;
+                if(auto* po=cell->getProperty("parameters").getDynamicObject())
+                    for(int i=0;i<po->getProperties().size();++i)
+                        pieces.add(po->getProperties().getName(i).toString()+"="+juce::String((double)po->getProperties().getValueAt(i),3));
+                pieces.add("input="+juce::String((double)cell->getProperty("inputGainDb"),1)+" dBFS");
+                firstHeavy=pieces.joinIntoString(", "); break;
+            }
+            mapObj->setProperty("firstHeavyOperatingPoint",firstHeavy.isNotEmpty()?firstHeavy:"none detected in tested grid");
+            producer->setProperty("startingPoint",firstCharacter.isNotEmpty()?firstCharacter:"No moderate-character region detected; inspect the Drive Map.");
+            producer->setProperty("heavyStarts",firstHeavy.isNotEmpty()?firstHeavy:"No heavy region detected in the tested grid.");
+            root->setProperty("driveMap",juce::var(mapObj));
+        }
+
         // Phase 2: compact Parameter DNA. This deliberately describes measured
         // movement first; semantic producer labels are calibrated separately.
         juce::Array<juce::var> parameterDna;
@@ -6036,7 +6305,7 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
         {
             auto* manifest = new juce::DynamicObject();
             manifest->setProperty("schema", "PluginDNA Full Evidence Manifest");
-            manifest->setProperty("schemaVersion", 25);
+            manifest->setProperty("schemaVersion", 27);
             manifest->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
             manifest->setProperty("evidenceFile", filename);
             manifest->setProperty("plugin", juce::File(pluginPath).getFileNameWithoutExtension());
