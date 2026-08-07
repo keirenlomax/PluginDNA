@@ -32,6 +32,8 @@ public:
 
 private:
     void loadPlugin();
+    void refreshAdditionalSerialStageVisibility();
+    void loadAdditionalSerialStage(int index);
     void loadSerialPlugin();
     void scanSerialPluginParameters();
     void saveCurrentParameterPanelState();
@@ -53,6 +55,20 @@ private:
         MeasurementDataset dataset;
     };
 
+    struct AdditionalSerialStage
+    {
+        int stageNumber = 0;
+        std::unique_ptr<juce::Label> label;
+        std::unique_ptr<juce::TextEditor> pathEditor;
+        std::unique_ptr<juce::TextButton> browseButton;
+        std::unique_ptr<juce::TextButton> loadButton;
+        std::unique_ptr<juce::TextButton> openButton;
+        std::unique_ptr<juce::TextButton> removeButton;
+        std::unique_ptr<juce::Label> infoLabel;
+        std::unique_ptr<juce::AudioPluginInstance> pluginInstance;
+        std::unique_ptr<juce::DocumentWindow> editorWindow;
+    };
+
     // Plugin selection
     juce::Label buildVersionLabel;
     juce::Label pluginPathLabel;
@@ -68,6 +84,8 @@ private:
     juce::TextButton serialLoadButton;
     juce::TextButton serialOpenButton;
     juce::Label serialPluginInfoLabel;
+    std::vector<std::unique_ptr<AdditionalSerialStage>> additionalSerialStages;
+    static constexpr int maxSerialStages = 8;
 
     // Plugin info
     juce::Label pluginInfoLabel;

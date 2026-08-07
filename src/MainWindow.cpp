@@ -41,7 +41,7 @@ void MainWindow::resized() {
         return;
 
     const int availableWidth = juce::jmax(900, viewport->getMaximumVisibleWidth());
-    const int contentHeight = 1580;
+    const int contentHeight = 1940;
 
     mainComponent->setSize(availableWidth, contentHeight);
 }

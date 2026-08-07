@@ -3048,7 +3048,7 @@ namespace
 
 MainComponent::MainComponent()
     : pluginPathLabel("Plugin Path:", "Plugin Path:"), pluginInfoLabel("", "No plugin loaded"),
-      serialPluginLabel("Serial Plugin (optional):", "Serial Plugin (optional):"), serialPluginInfoLabel("", "No serial plugin loaded"),
+      serialPluginLabel("Plugin 2 (serial):", "Plugin 2 (serial):"), serialPluginInfoLabel("", "No serial plugin loaded"),
       parametersLabel("", ""), outputPathLabel("Output Path:", "Output Path:"),
       progressLabel("", "Ready"), progressBar(progress) {
     buildVersionLabel.setText({}, juce::dontSendNotification);
@@ -3088,9 +3088,37 @@ MainComponent::MainComponent()
     addAndMakeVisible(serialPluginLabel);
     addAndMakeVisible(serialPluginPathEditor);
     serialBrowseButton.setButtonText("Browse..."); serialBrowseButton.addListener(this); addAndMakeVisible(serialBrowseButton);
-    serialLoadButton.setButtonText("Load Serial"); serialLoadButton.addListener(this); addAndMakeVisible(serialLoadButton);
+    serialLoadButton.setButtonText("Load"); serialLoadButton.addListener(this); addAndMakeVisible(serialLoadButton);
     serialOpenButton.setButtonText("Open"); serialOpenButton.addListener(this); serialOpenButton.setEnabled(false); addAndMakeVisible(serialOpenButton);
     addAndMakeVisible(serialPluginInfoLabel);
+
+    // Expandable serial chain: Plugin 3..8 appear one at a time as the previous stage is loaded.
+    for (int stageNumber = 3; stageNumber <= maxSerialStages; ++stageNumber)
+    {
+        auto stage = std::make_unique<AdditionalSerialStage>();
+        stage->stageNumber = stageNumber;
+        stage->label = std::make_unique<juce::Label>(juce::String(), "Plugin " + juce::String(stageNumber) + " (serial):");
+        stage->pathEditor = std::make_unique<juce::TextEditor>();
+        stage->browseButton = std::make_unique<juce::TextButton>("Browse...");
+        stage->loadButton = std::make_unique<juce::TextButton>("Load");
+        stage->openButton = std::make_unique<juce::TextButton>("Open");
+        stage->removeButton = std::make_unique<juce::TextButton>("Remove");
+        stage->infoLabel = std::make_unique<juce::Label>(juce::String(), "No plugin loaded");
+        stage->browseButton->addListener(this);
+        stage->loadButton->addListener(this);
+        stage->openButton->addListener(this);
+        stage->removeButton->addListener(this);
+        stage->openButton->setEnabled(false);
+        addAndMakeVisible(*stage->label);
+        addAndMakeVisible(*stage->pathEditor);
+        addAndMakeVisible(*stage->browseButton);
+        addAndMakeVisible(*stage->loadButton);
+        addAndMakeVisible(*stage->openButton);
+        addAndMakeVisible(*stage->removeButton);
+        addAndMakeVisible(*stage->infoLabel);
+        additionalSerialStages.push_back(std::move(stage));
+    }
+    refreshAdditionalSerialStageVisibility();
 
     // Parameter scan panel
     parameterScanGroup.setText("Parameter Scan");
@@ -3199,7 +3227,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(progressBar);
     progressBar.setPercentageDisplay(false);
 
-    setSize(1240, 1540);
+    setSize(1240, 1900);
 }
 
 MainComponent::~MainComponent() {}
@@ -3215,7 +3243,9 @@ void MainComponent::resized() {
     bounds.removeFromTop(4);
 
     // Plugin path section (top)
-    auto pluginSection = bounds.removeFromTop(150);
+    int visibleExtraStages = 0;
+    for (const auto& stage : additionalSerialStages) if (stage->label->isVisible()) ++visibleExtraStages;
+    auto pluginSection = bounds.removeFromTop(160 + visibleExtraStages * 74);
     pluginPathLabel.setBounds(pluginSection.removeFromTop(25));
     auto pluginRow = pluginSection.removeFromTop(30);
     pluginPathEditor.setBounds(pluginRow.removeFromLeft(600));
@@ -3232,7 +3262,21 @@ void MainComponent::resized() {
     serialBrowseButton.setBounds(serialRow.removeFromLeft(100)); serialRow.removeFromLeft(10);
     serialLoadButton.setBounds(serialRow.removeFromLeft(120)); serialRow.removeFromLeft(10);
     serialOpenButton.setBounds(serialRow.removeFromLeft(80));
-    serialPluginInfoLabel.setBounds(pluginSection);
+    serialPluginInfoLabel.setBounds(pluginSection.removeFromTop(25));
+
+    for (auto& stage : additionalSerialStages)
+    {
+        if (!stage->label->isVisible())
+            continue;
+        stage->label->setBounds(pluginSection.removeFromTop(22));
+        auto stageRow = pluginSection.removeFromTop(30);
+        stage->pathEditor->setBounds(stageRow.removeFromLeft(520)); stageRow.removeFromLeft(8);
+        stage->browseButton->setBounds(stageRow.removeFromLeft(90)); stageRow.removeFromLeft(8);
+        stage->loadButton->setBounds(stageRow.removeFromLeft(80)); stageRow.removeFromLeft(8);
+        stage->openButton->setBounds(stageRow.removeFromLeft(70)); stageRow.removeFromLeft(8);
+        stage->removeButton->setBounds(stageRow.removeFromLeft(80));
+        stage->infoLabel->setBounds(pluginSection.removeFromTop(22));
+    }
     bounds.removeFromTop(10);
 
     // Main laboratory panels (side by side, equal height)
@@ -3344,6 +3388,50 @@ void MainComponent::resized() {
 }
 
 void MainComponent::buttonClicked(juce::Button* button) {
+    for (int i = 0; i < (int)additionalSerialStages.size(); ++i)
+    {
+        auto& stage = *additionalSerialStages[(size_t)i];
+        if (button == stage.browseButton.get())
+        {
+            auto chooser = std::make_shared<juce::FileChooser>("Select Plugin " + juce::String(stage.stageNumber) + " (VST3 or Audio Unit)", juce::File(), "*.vst3;*.component");
+            auto chooserFlags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+            chooser->launchAsync(chooserFlags, [this, chooser, i](const juce::FileChooser& fc) {
+                if (fc.getResults().size() > 0 && i < (int)additionalSerialStages.size())
+                    additionalSerialStages[(size_t)i]->pathEditor->setText(fc.getResult().getFullPathName(), juce::dontSendNotification);
+            });
+            return;
+        }
+        if (button == stage.loadButton.get())
+        {
+            loadAdditionalSerialStage(i);
+            return;
+        }
+        if (button == stage.openButton.get())
+        {
+            openPluginEditor(stage.pluginInstance.get(), stage.editorWindow,
+                             stage.pluginInstance != nullptr ? stage.pluginInstance->getName() : "Serial Plugin");
+            return;
+        }
+        if (button == stage.removeButton.get())
+        {
+            stage.editorWindow.reset();
+            stage.pluginInstance.reset();
+            stage.pathEditor->clear();
+            stage.infoLabel->setText("No plugin loaded", juce::dontSendNotification);
+            stage.openButton->setEnabled(false);
+            // Removing a stage also clears every later stage so the serial chain remains contiguous.
+            for (int j = i + 1; j < (int)additionalSerialStages.size(); ++j)
+            {
+                auto& later = *additionalSerialStages[(size_t)j];
+                later.editorWindow.reset(); later.pluginInstance.reset(); later.pathEditor->clear();
+                later.infoLabel->setText("No plugin loaded", juce::dontSendNotification);
+                later.openButton->setEnabled(false);
+            }
+            refreshAdditionalSerialStageVisibility();
+            resized();
+            return;
+        }
+    }
     if (button == &plugin1ParameterButton) {
         saveCurrentParameterPanelState();
         loadParameterPanelState(false);
@@ -3578,15 +3666,57 @@ void MainComponent::openPluginEditor(juce::AudioPluginInstance* plugin, std::uni
 void MainComponent::loadSerialPlugin()
 {
     const auto path = serialPluginPathEditor.getText().trim();
-    if (path.isEmpty()) { serialPluginInstance.reset(); serialOpenButton.setEnabled(false); serialPluginInfoLabel.setText("Serial stage disabled", juce::dontSendNotification); return; }
+    if (path.isEmpty()) {
+        serialPluginEditorWindow.reset(); serialPluginInstance.reset(); serialOpenButton.setEnabled(false);
+        serialPluginInfoLabel.setText("Plugin 2 disabled", juce::dontSendNotification);
+        for (auto& stage : additionalSerialStages) { stage->editorWindow.reset(); stage->pluginInstance.reset(); stage->pathEditor->clear(); stage->openButton->setEnabled(false); }
+        refreshAdditionalSerialStageVisibility(); resized(); return;
+    }
     serialPluginEditorWindow.reset();
     Config tempConfig; measurementConfig->fillConfig(tempConfig);
     juce::String error;
     serialPluginInstance = loadPluginInstance(juce::File(path), tempConfig.sampleRate, tempConfig.blockSize, error);
     if (serialPluginInstance == nullptr) { showError(error); return; }
-    serialPluginInfoLabel.setText("Serial stage: " + serialPluginInstance->getName(), juce::dontSendNotification);
+    serialPluginInfoLabel.setText("Loaded: " + serialPluginInstance->getName(), juce::dontSendNotification);
     serialOpenButton.setEnabled(serialPluginInstance->hasEditor());
     scanSerialPluginParameters();
+    refreshAdditionalSerialStageVisibility();
+    resized();
+}
+
+void MainComponent::refreshAdditionalSerialStageVisibility()
+{
+    bool revealNext = (serialPluginInstance != nullptr);
+    for (auto& stage : additionalSerialStages)
+    {
+        const bool visible = revealNext;
+        stage->label->setVisible(visible); stage->pathEditor->setVisible(visible);
+        stage->browseButton->setVisible(visible); stage->loadButton->setVisible(visible);
+        stage->openButton->setVisible(visible); stage->removeButton->setVisible(visible);
+        stage->infoLabel->setVisible(visible);
+        revealNext = visible && stage->pluginInstance != nullptr;
+    }
+}
+
+void MainComponent::loadAdditionalSerialStage(int index)
+{
+    if (index < 0 || index >= (int)additionalSerialStages.size()) return;
+    auto& stage = *additionalSerialStages[(size_t)index];
+    const auto path = stage.pathEditor->getText().trim();
+    if (path.isEmpty())
+    {
+        showError("Choose a plugin for Plugin " + juce::String(stage.stageNumber) + " first.");
+        return;
+    }
+    stage.editorWindow.reset();
+    Config tempConfig; measurementConfig->fillConfig(tempConfig);
+    juce::String error;
+    stage.pluginInstance = loadPluginInstance(juce::File(path), tempConfig.sampleRate, tempConfig.blockSize, error);
+    if (stage.pluginInstance == nullptr) { showError(error); return; }
+    stage.infoLabel->setText("Loaded: " + stage.pluginInstance->getName(), juce::dontSendNotification);
+    stage.openButton->setEnabled(stage.pluginInstance->hasEditor());
+    refreshAdditionalSerialStageVisibility();
+    resized();
 }
 
 void MainComponent::scanPluginParameters() {
@@ -3734,6 +3864,17 @@ void MainComponent::runMeasurement() {
     if (serialPluginInstance != nullptr)
         serialPluginInstance->getStateInformation(*serialState);
 
+    std::vector<juce::String> additionalSerialPaths;
+    std::vector<std::shared_ptr<juce::MemoryBlock>> additionalSerialStates;
+    for (const auto& stage : additionalSerialStages)
+    {
+        if (stage->pluginInstance == nullptr) break;
+        additionalSerialPaths.push_back(stage->pathEditor->getText().trim());
+        auto state = std::make_shared<juce::MemoryBlock>();
+        stage->pluginInstance->getStateInformation(*state);
+        additionalSerialStates.push_back(std::move(state));
+    }
+
     // Run measurement in background thread
     runMeasurementButton.setEnabled(false);
     exportDataButton.setEnabled(false);
@@ -3747,7 +3888,7 @@ void MainComponent::runMeasurement() {
         hasPendingEvidencePack = false;
     }
 
-    std::thread([this, config, outDir, primaryState, serialState, serialPath]() {
+    std::thread([this, config, outDir, primaryState, serialState, serialPath, additionalSerialPaths, additionalSerialStates]() {
         try {
 
             // Build parameter name list
@@ -3926,15 +4067,29 @@ void MainComponent::runMeasurement() {
                 if (primaryState != nullptr && primaryState->getSize() > 0)
                     passPlugin->setStateInformation(primaryState->getData(), static_cast<int>(primaryState->getSize()));
 
-                std::unique_ptr<juce::AudioPluginInstance> passSerialPlugin;
+                std::vector<std::unique_ptr<juce::AudioPluginInstance>> passSerialOwned;
+                std::vector<juce::AudioPluginInstance*> passSerialPlugins;
                 if (serialPath.isNotEmpty())
                 {
                     juce::String serialError;
-                    passSerialPlugin = loadPluginInstance(juce::File(serialPath), passConfig.sampleRate, passConfig.blockSize, serialError);
-                    if (passSerialPlugin == nullptr)
-                        throw std::runtime_error(("Failed to create serial plugin for " + passSignal + ": " + serialError).toStdString());
+                    auto serial = loadPluginInstance(juce::File(serialPath), passConfig.sampleRate, passConfig.blockSize, serialError);
+                    if (serial == nullptr)
+                        throw std::runtime_error(("Failed to create Plugin 2 for " + passSignal + ": " + serialError).toStdString());
                     if (serialState != nullptr && serialState->getSize() > 0)
-                        passSerialPlugin->setStateInformation(serialState->getData(), static_cast<int>(serialState->getSize()));
+                        serial->setStateInformation(serialState->getData(), static_cast<int>(serialState->getSize()));
+                    passSerialPlugins.push_back(serial.get());
+                    passSerialOwned.push_back(std::move(serial));
+                }
+                for (size_t i = 0; i < additionalSerialPaths.size(); ++i)
+                {
+                    juce::String extraError;
+                    auto extra = loadPluginInstance(juce::File(additionalSerialPaths[i]), passConfig.sampleRate, passConfig.blockSize, extraError);
+                    if (extra == nullptr)
+                        throw std::runtime_error(("Failed to create Plugin " + juce::String((int)i + 3) + " for " + passSignal + ": " + extraError).toStdString());
+                    if (i < additionalSerialStates.size() && additionalSerialStates[i] != nullptr && additionalSerialStates[i]->getSize() > 0)
+                        extra->setStateInformation(additionalSerialStates[i]->getData(), static_cast<int>(additionalSerialStates[i]->getSize()));
+                    passSerialPlugins.push_back(extra.get());
+                    passSerialOwned.push_back(std::move(extra));
                 }
 
                 auto passAnalyzers = createAnalyzers(passConfig, juce::File{}, paramNames);
@@ -3972,7 +4127,7 @@ void MainComponent::runMeasurement() {
                             progress = overallProgress;
                             progressBar.repaint();
                         });
-                    }, passSerialPlugin.get());
+                    }, passSerialPlugins);
 
                 completedPassRuns += (int)runs.size();
 
@@ -4378,10 +4533,18 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
     const auto pluginInfo = pluginInfoLabel.getText();
     const auto serialPluginPath = serialPluginPathEditor.getText().trim();
     const auto serialPluginInfo = serialPluginInfoLabel.getText();
-    std::thread([this, outDir, config, summary, datasets = std::move(datasets), fullPackageFiles, pluginPath, pluginInfo, serialPluginPath, serialPluginInfo, exportingFullPackage]() mutable {
+    std::vector<juce::String> additionalPluginPaths;
+    std::vector<juce::String> additionalPluginInfos;
+    for (const auto& stage : additionalSerialStages)
+    {
+        if (stage->pluginInstance == nullptr) break;
+        additionalPluginPaths.push_back(stage->pathEditor->getText().trim());
+        additionalPluginInfos.push_back(stage->infoLabel->getText());
+    }
+    std::thread([this, outDir, config, summary, datasets = std::move(datasets), fullPackageFiles, pluginPath, pluginInfo, serialPluginPath, serialPluginInfo, additionalPluginPaths, additionalPluginInfos, exportingFullPackage]() mutable {
         auto* root = new juce::DynamicObject();
         root->setProperty("schema", "PluginDNA Evidence Pack");
-        root->setProperty("schemaVersion", 23);
+        root->setProperty("schemaVersion", 24);
         root->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
 
         const juce::File pluginFile(pluginPath);
@@ -4390,17 +4553,37 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
         plugin->setProperty("path", pluginPath);
         plugin->setProperty("info", pluginInfo);
         root->setProperty("plugin", juce::var(plugin));
+        juce::Array<juce::var> chain;
+        {
+            auto* stage1 = new juce::DynamicObject();
+            stage1->setProperty("position", 1); stage1->setProperty("name", pluginFile.getFileNameWithoutExtension());
+            stage1->setProperty("path", pluginPath); stage1->setProperty("info", pluginInfo);
+            chain.add(juce::var(stage1));
+        }
         if (serialPluginPath.isNotEmpty())
         {
             auto* serial = new juce::DynamicObject();
             serial->setProperty("name", juce::File(serialPluginPath).getFileNameWithoutExtension());
-            serial->setProperty("path", serialPluginPath);
-            serial->setProperty("info", serialPluginInfo);
+            serial->setProperty("path", serialPluginPath); serial->setProperty("info", serialPluginInfo);
             serial->setProperty("position", 2);
-            root->setProperty("serialPlugin", juce::var(serial));
-            root->setProperty("systemType", "two-plugin serial stage");
+            root->setProperty("serialPlugin", juce::var(serial)); // compatibility with schema 23 readers
+            auto* stage2 = new juce::DynamicObject();
+            stage2->setProperty("position", 2); stage2->setProperty("name", juce::File(serialPluginPath).getFileNameWithoutExtension());
+            stage2->setProperty("path", serialPluginPath); stage2->setProperty("info", serialPluginInfo);
+            chain.add(juce::var(stage2));
         }
-        else root->setProperty("systemType", "single plugin");
+        for (size_t i = 0; i < additionalPluginPaths.size(); ++i)
+        {
+            auto* extra = new juce::DynamicObject();
+            extra->setProperty("position", (int)i + 3);
+            extra->setProperty("name", juce::File(additionalPluginPaths[i]).getFileNameWithoutExtension());
+            extra->setProperty("path", additionalPluginPaths[i]);
+            if (i < additionalPluginInfos.size()) extra->setProperty("info", additionalPluginInfos[i]);
+            chain.add(juce::var(extra));
+        }
+        root->setProperty("pluginChain", chain);
+        const int chainCount = 1 + (serialPluginPath.isNotEmpty() ? 1 : 0) + (int)additionalPluginPaths.size();
+        root->setProperty("systemType", chainCount > 1 ? "serial plugin chain" : "single plugin");
 
         auto* test = new juce::DynamicObject();
         test->setProperty("sampleRate", config.sampleRate);
@@ -5610,12 +5793,17 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
         {
             auto* manifest = new juce::DynamicObject();
             manifest->setProperty("schema", "PluginDNA Full Evidence Manifest");
-            manifest->setProperty("schemaVersion", 23);
+            manifest->setProperty("schemaVersion", 24);
             manifest->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
             manifest->setProperty("evidenceFile", filename);
             manifest->setProperty("plugin", juce::File(pluginPath).getFileNameWithoutExtension());
             if (serialPluginPath.isNotEmpty())
                 manifest->setProperty("serialPlugin", juce::File(serialPluginPath).getFileNameWithoutExtension());
+            juce::Array<juce::var> manifestChain;
+            manifestChain.add(juce::File(pluginPath).getFileNameWithoutExtension());
+            if (serialPluginPath.isNotEmpty()) manifestChain.add(juce::File(serialPluginPath).getFileNameWithoutExtension());
+            for (const auto& path : additionalPluginPaths) manifestChain.add(juce::File(path).getFileNameWithoutExtension());
+            manifest->setProperty("pluginChain", manifestChain);
             manifest->setProperty("sampleRate", config.sampleRate);
             manifest->setProperty("blockSize", config.blockSize);
             manifest->setProperty("durationSeconds", config.seconds);

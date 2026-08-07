@@ -156,11 +156,13 @@ std::vector<std::unique_ptr<Analyzer>> createAnalyzers(const Config& config, con
 void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, int blockSize, int64_t totalSamples,
                         const std::vector<RunConfig>& runs, const std::vector<std::unique_ptr<Analyzer>>& analyzers,
                         const Config& config, const juce::File& outDir, std::function<void(int)> progressCallback,
-                        juce::AudioPluginInstance* serialPlugin) {
+                        const std::vector<juce::AudioPluginInstance*>& serialPlugins) {
     auto paramMap = buildParameterMap(plugin, false); // Plugin 1 parameters
-    std::map<juce::String, juce::AudioProcessorParameter*> serialParamMap;
-    if (serialPlugin != nullptr)
-        serialParamMap = buildParameterMap(*serialPlugin, false);
+    std::vector<std::map<juce::String, juce::AudioProcessorParameter*>> serialParamMaps;
+    serialParamMaps.reserve(serialPlugins.size());
+    for (auto* serialPlugin : serialPlugins)
+        serialParamMaps.push_back(serialPlugin != nullptr ? buildParameterMap(*serialPlugin, false)
+                                                          : std::map<juce::String, juce::AudioProcessorParameter*>{});
 
     // Build parameter name list in order
     std::vector<juce::String> paramNames;
@@ -180,11 +182,15 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
         }
         // Set plugin parameters
         for (const auto& [paramName, value] : run.paramValues) {
-            if (paramName.startsWith("P2::")) {
-                if (serialPlugin != nullptr)
-                    setParameterValue(*serialPlugin, serialParamMap, paramName.substring(4), value);
-            } else if (paramName.startsWith("P1::")) {
+            if (paramName.startsWith("P1::")) {
                 setParameterValue(plugin, paramMap, paramName.substring(4), value);
+            } else if (paramName.startsWith("P") && paramName.contains("::")) {
+                const int delimiter = paramName.indexOf("::");
+                const int stageNumber = paramName.substring(1, delimiter).getIntValue();
+                const int serialIndex = stageNumber - 2;
+                if (serialIndex >= 0 && serialIndex < (int)serialPlugins.size() && serialPlugins[(size_t)serialIndex] != nullptr)
+                    setParameterValue(*serialPlugins[(size_t)serialIndex], serialParamMaps[(size_t)serialIndex],
+                                      paramName.substring(delimiter + 2), value);
             } else {
                 setParameterValue(plugin, paramMap, paramName, value);
             }
@@ -285,8 +291,9 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
 
             // Process through plugin (modifies outputBuffer in-place)
             plugin.processBlock(outputBuffer, midiBuffer);
-            if (serialPlugin != nullptr)
-                serialPlugin->processBlock(outputBuffer, midiBuffer);
+            for (auto* serialPlugin : serialPlugins)
+                if (serialPlugin != nullptr)
+                    serialPlugin->processBlock(outputBuffer, midiBuffer);
 
             // Build BlockContext
             BlockContext ctx;
