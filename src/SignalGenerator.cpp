@@ -76,31 +76,25 @@ void InteractionGenerator::reset()
     currentSample = 0;
     std::fill(phasesBroadband.begin(), phasesBroadband.end(), 0.0);
     std::fill(phasesHighPair.begin(), phasesHighPair.end(), 0.0);
+    std::fill(phasesLowImd.begin(), phasesLowImd.end(), 0.0);
 }
 
 void InteractionGenerator::fillBlock(juce::AudioBuffer<float>& buffer, int numSamples)
 {
     static const std::vector<double> broadband { 60.0, 250.0, 1000.0, 4000.0, 10000.0 };
     static const std::vector<double> highPair { 19000.0, 20000.0 };
-    const int64_t halfSample = static_cast<int64_t>(duration * sampleRate * 0.5);
-
-    for (int i = 0; i < numSamples; ++i)
-    {
-        const bool firstHalf = currentSample < halfSample;
-        const auto& frequencies = firstHalf ? broadband : highPair;
-        auto& phases = firstHalf ? phasesBroadband : phasesHighPair;
-        const double perTone = amplitude / static_cast<double>(frequencies.size());
-        double value = 0.0;
-        for (std::size_t tone = 0; tone < frequencies.size(); ++tone)
-        {
-            value += perTone * std::sin(phases[tone]);
-            phases[tone] += 2.0 * juce::MathConstants<double>::pi * frequencies[tone] / sampleRate;
-            if (phases[tone] > 2.0 * juce::MathConstants<double>::pi)
-                phases[tone] -= 2.0 * juce::MathConstants<double>::pi;
+    static const std::vector<double> lowImd { 60.0, 7000.0 };
+    const int64_t section = std::max<int64_t>(1, static_cast<int64_t>(duration * sampleRate / 3.0));
+    for (int i=0;i<numSamples;++i,++currentSample) {
+        int test=juce::jlimit(0,2,(int)(currentSample/section)); double value=0.0;
+        if(test==0){for(size_t t=0;t<broadband.size();++t){value+=(amplitude/broadband.size())*std::sin(phasesBroadband[t]);phasesBroadband[t]=std::fmod(phasesBroadband[t]+2.0*juce::MathConstants<double>::pi*broadband[t]/sampleRate,2.0*juce::MathConstants<double>::pi);}}
+        else if(test==1){for(size_t t=0;t<highPair.size();++t){value+=(amplitude/highPair.size())*std::sin(phasesHighPair[t]);phasesHighPair[t]=std::fmod(phasesHighPair[t]+2.0*juce::MathConstants<double>::pi*highPair[t]/sampleRate,2.0*juce::MathConstants<double>::pi);}}
+        else { // SMPTE-style 60 Hz + 7 kHz, 4:1 amplitude ratio
+            value=amplitude*(0.8*std::sin(phasesLowImd[0])+0.2*std::sin(phasesLowImd[1]));
+            phasesLowImd[0]=std::fmod(phasesLowImd[0]+2.0*juce::MathConstants<double>::pi*lowImd[0]/sampleRate,2.0*juce::MathConstants<double>::pi);
+            phasesLowImd[1]=std::fmod(phasesLowImd[1]+2.0*juce::MathConstants<double>::pi*lowImd[1]/sampleRate,2.0*juce::MathConstants<double>::pi);
         }
-        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
-            buffer.getWritePointer(ch)[i] = static_cast<float>(value);
-        ++currentSample;
+        for(int ch=0;ch<buffer.getNumChannels();++ch)buffer.setSample(ch,i,(float)value);
     }
 }
 
@@ -204,3 +198,25 @@ void AliasStressGenerator::fillBlock(juce::AudioBuffer<float>& buffer, int numSa
             buffer.setSample(ch, i, value);
     }
 }
+
+
+void DynamicEnvelopeGenerator::fillBlock(juce::AudioBuffer<float>& b,int n){
+ const int64_t q=std::max<int64_t>(1,(int64_t)(duration*sampleRate/4.0));
+ for(int i=0;i<n;++i,++currentSample){int sec=juce::jlimit(0,3,(int)(currentSample/q));
+   const double db=(sec==1||sec==2)?-6.0:-30.0; const float a=amplitude*std::pow(10.0f,(float)db/20.0f);
+   float v=a*(float)std::sin(phase); phase=std::fmod(phase+2.0*juce::MathConstants<double>::pi*frequency/sampleRate,2.0*juce::MathConstants<double>::pi);
+   for(int ch=0;ch<b.getNumChannels();++ch)b.setSample(ch,i,v);
+ }}
+void HysteresisGenerator::fillBlock(juce::AudioBuffer<float>& b,int n){
+ static const double dbv[]={-30,-24,-18,-12,-6,0,-6,-12,-18,-24,-30};
+ const int count=11; const int64_t seg=std::max<int64_t>(1,(int64_t)(duration*sampleRate/count));
+ for(int i=0;i<n;++i,++currentSample){int k=juce::jlimit(0,count-1,(int)(currentSample/seg));
+   float a=amplitude*std::pow(10.0f,(float)dbv[k]/20.0f); float v=a*(float)std::sin(phase);
+   phase=std::fmod(phase+2.0*juce::MathConstants<double>::pi*frequency/sampleRate,2.0*juce::MathConstants<double>::pi);
+   for(int ch=0;ch<b.getNumChannels();++ch)b.setSample(ch,i,v);
+ }}
+void TruePeakGenerator::fillBlock(juce::AudioBuffer<float>& b,int n){
+ const double inc=2.0*juce::MathConstants<double>::pi*frequency/sampleRate;
+ for(int i=0;i<n;++i){float v=amplitude*(float)std::sin(phase); phase=std::fmod(phase+inc,2.0*juce::MathConstants<double>::pi);
+   for(int ch=0;ch<b.getNumChannels();++ch)b.setSample(ch,i,v);
+ }}

@@ -41,6 +41,7 @@ struct InteractionGenerator {
     int64_t currentSample = 0;
     std::vector<double> phasesBroadband = std::vector<double>(5, 0.0);
     std::vector<double> phasesHighPair = std::vector<double>(2, 0.0);
+    std::vector<double> phasesLowImd = std::vector<double>(2, 0.0);
 
     void reset();
     void fillBlock(juce::AudioBuffer<float>& buffer, int numSamples);
@@ -94,4 +95,26 @@ struct AliasStressGenerator {
     double phase = 0.0;
     void reset() { currentSample = 0; phase = 0.0; }
     void fillBlock(juce::AudioBuffer<float>& buffer, int numSamples);
+};
+
+
+// V20 measurement stimuli
+struct DynamicEnvelopeGenerator {
+    double sampleRate=96000.0, duration=4.0, frequency=997.0; float amplitude=1.0f;
+    int64_t currentSample=0; double phase=0.0;
+    void reset(){currentSample=0;phase=0.0;}
+    void fillBlock(juce::AudioBuffer<float>& buffer,int numSamples);
+};
+struct HysteresisGenerator {
+    double sampleRate=96000.0, duration=4.0, frequency=997.0; float amplitude=1.0f;
+    int64_t currentSample=0; double phase=0.0;
+    void reset(){currentSample=0;phase=0.0;}
+    void fillBlock(juce::AudioBuffer<float>& buffer,int numSamples);
+};
+struct SilenceGenerator {
+    void fillBlock(juce::AudioBuffer<float>& buffer,int numSamples){ buffer.clear(0,numSamples); }
+};
+struct TruePeakGenerator {
+    double sampleRate=96000.0, frequency=997.0; float amplitude=1.0f; double phase=0.0;
+    void fillBlock(juce::AudioBuffer<float>& buffer,int numSamples);
 };

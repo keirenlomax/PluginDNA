@@ -72,6 +72,7 @@ private:
     juce::ToggleButton stereoButton;
     juce::ToggleButton summingButton;
     juce::ToggleButton aliasButton;
+    juce::ToggleButton envelopeButton, hysteresisButton, silenceButton, truePeakButton;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MeasurementConfigComponent)
 };

@@ -134,12 +134,16 @@ MeasurementConfigComponent::MeasurementConfigComponent() {
     aliasButton.setButtonText("Alias Stress");
     aliasButton.setToggleState(true, juce::dontSendNotification);
     addAndMakeVisible(aliasButton);
+    envelopeButton.setButtonText("Dynamic Envelope"); envelopeButton.setToggleState(true, juce::dontSendNotification); addAndMakeVisible(envelopeButton);
+    hysteresisButton.setButtonText("Hysteresis / Memory"); hysteresisButton.setToggleState(true, juce::dontSendNotification); addAndMakeVisible(hysteresisButton);
+    silenceButton.setButtonText("Silence / Self-Noise"); silenceButton.setToggleState(true, juce::dontSendNotification); addAndMakeVisible(silenceButton);
+    truePeakButton.setButtonText("True Peak"); truePeakButton.setToggleState(true, juce::dontSendNotification); addAndMakeVisible(truePeakButton);
 
     analyzersLabel.setColour(juce::Label::textColourId, juce::Colours::white);
     analyzersLabel.setFont(juce::Font(juce::FontOptions(15.0f, juce::Font::bold)));
     for (auto* toggle : { &rawCsvButton, &rmsPeakButton, &transferCurveButton, &linearResponseButton,
                           &thdButton, &interactionButton, &timingButton, &residualButton,
-                          &boundaryButton, &stereoButton, &summingButton, &aliasButton })
+                          &boundaryButton, &stereoButton, &summingButton, &aliasButton, &envelopeButton, &hysteresisButton, &silenceButton, &truePeakButton })
     {
         toggle->setColour(juce::ToggleButton::textColourId, juce::Colours::white);
         toggle->setColour(juce::ToggleButton::tickColourId, juce::Colours::limegreen);
@@ -187,6 +191,8 @@ void MeasurementConfigComponent::resized() {
     placePair(timingButton, residualButton);
     placePair(boundaryButton, stereoButton);
     placePair(summingButton, aliasButton);
+    placePair(envelopeButton, hysteresisButton);
+    placePair(silenceButton, truePeakButton);
     bounds.removeFromTop(10);
 
     auto placeLabelEditor = [&](juce::Label& label, juce::TextEditor& editor,
@@ -262,7 +268,7 @@ void MeasurementConfigComponent::setAllAnalyzers(bool enabled)
 {
     for (auto* toggle : { &rawCsvButton, &rmsPeakButton, &transferCurveButton, &linearResponseButton,
                           &thdButton, &interactionButton, &timingButton, &residualButton,
-                          &boundaryButton, &stereoButton, &summingButton, &aliasButton })
+                          &boundaryButton, &stereoButton, &summingButton, &aliasButton, &envelopeButton, &hysteresisButton, &silenceButton, &truePeakButton })
         toggle->setToggleState(enabled, juce::dontSendNotification);
 }
 
@@ -346,6 +352,10 @@ void MeasurementConfigComponent::fillConfig(Config& config) {
         config.analyzers.push_back("Summing");
     if (aliasButton.getToggleState())
         config.analyzers.push_back("Alias");
+    if (envelopeButton.getToggleState()) config.analyzers.push_back("Envelope");
+    if (hysteresisButton.getToggleState()) config.analyzers.push_back("Hysteresis");
+    if (silenceButton.getToggleState()) config.analyzers.push_back("Silence");
+    if (truePeakButton.getToggleState()) config.analyzers.push_back("TruePeak");
 }
 
 void MeasurementConfigComponent::loadFromConfig(const Config& config) {

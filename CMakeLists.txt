@@ -68,6 +68,7 @@ set(SOURCES
     src/ThdAnalyzer.h
     src/MeasurementEngine.cpp
     src/MeasurementEngine.h
+    src/V20Analyzers.h
 )
 
 # Create GUI application

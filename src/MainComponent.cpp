@@ -6,6 +6,7 @@
 #include "StereoAnalyzer.h"
 #include "SummingAnalyzer.h"
 #include "AliasAnalyzer.h"
+#include "V20Analyzers.h"
 #include "TimingAnalyzer.h"
 #include "ResidualAnalyzer.h"
 #include "BoundaryAnalyzer.h"
@@ -2702,7 +2703,7 @@ namespace
         else if (filename.containsIgnoreCase("interaction_dna"))
         {
             const int cc=index("productClass"); auto all=collect("magDbRelativeToInput"); addStats("allProductsDb",all);
-            for(int cls=1;cls<=4;++cls)addStats("productClass"+juce::String(cls)+"Db",collect("magDbRelativeToInput",[&](const std::vector<double>& r){return std::llround(value(r,cc))==cls;}));
+            for(int cls=1;cls<=5;++cls)addStats("productClass"+juce::String(cls)+"Db",collect("magDbRelativeToInput",[&](const std::vector<double>& r){return std::llround(value(r,cc))==cls;}));
             if(!all.empty())
             {
                 add("worstProductDb",*std::max_element(all.begin(),all.end()));
@@ -2789,6 +2790,62 @@ namespace
             const auto residual = collect("interactionResidualDbRelative");
             if (!residual.empty()) add("strongestSummingInteractionDb", *std::max_element(residual.begin(), residual.end()));
         }
+
+        else if (filename.containsIgnoreCase("envelope_dna"))
+        {
+            addStats("attackMs", collect("attackMs"));
+            addStats("releaseMs", collect("releaseMs"));
+            addStats("attackOvershootDb", collect("attackOvershootDb"));
+            addStats("releaseUndershootDb", collect("releaseUndershootDb"));
+            addStats("lowGainDb", collect("lowGainDb"));
+            addStats("highGainDb", collect("highGainDb"));
+            const auto a = collect("attackMs"), r = collect("releaseMs");
+            const auto ao = collect("attackOvershootDb"), ru = collect("releaseUndershootDb");
+            if (!a.empty()) add("slowestAttackMs", *std::max_element(a.begin(), a.end()));
+            if (!r.empty()) add("slowestReleaseMs", *std::max_element(r.begin(), r.end()));
+            if (!ao.empty()) add("maximumAttackOvershootDb", *std::max_element(ao.begin(), ao.end()));
+            if (!ru.empty()) add("maximumReleaseUndershootDb", *std::max_element(ru.begin(), ru.end()));
+        }
+        else if (filename.containsIgnoreCase("hysteresis_dna"))
+        {
+            addStats("upGainDb", collect("upGainDb"));
+            addStats("downGainDb", collect("downGainDb"));
+            addStats("hysteresisDb", collect("hysteresisDb"));
+            const auto h = collect("hysteresisDb");
+            if (!h.empty())
+            {
+                add("maximumAbsoluteHysteresisDb",
+                    std::abs(*std::max_element(h.begin(), h.end(), [](double x, double y)
+                    { return std::abs(x) < std::abs(y); })));
+                double sum = 0.0;
+                for (double v : h) sum += std::abs(v);
+                add("meanAbsoluteHysteresisDb", sum / static_cast<double>(h.size()));
+            }
+        }
+        else if (filename.containsIgnoreCase("silence_dna"))
+        {
+            addStats("outputRmsDbFS", collect("outputRmsDbFS"));
+            addStats("outputPeakDbFS", collect("outputPeakDbFS"));
+            addStats("dcOffset", collect("dcOffset"));
+            addStats("noiseVariationDb", collect("noiseVariationDb"));
+            const auto nr = collect("outputRmsDbFS"), np = collect("outputPeakDbFS"), dc = collect("dcOffset");
+            if (!nr.empty()) add("worstSelfNoiseRmsDbFS", *std::max_element(nr.begin(), nr.end()));
+            if (!np.empty()) add("worstSelfNoisePeakDbFS", *std::max_element(np.begin(), np.end()));
+            if (!dc.empty())
+                add("maximumAbsoluteDcOffset",
+                    std::abs(*std::max_element(dc.begin(), dc.end(), [](double x, double y)
+                    { return std::abs(x) < std::abs(y); })));
+        }
+        else if (filename.containsIgnoreCase("truepeak_dna"))
+        {
+            addStats("samplePeakDbFS", collect("samplePeakDbFS"));
+            addStats("truePeakDbTP", collect("truePeakDbTP"));
+            addStats("intersampleOvershootDb", collect("intersampleOvershootDb"));
+            const auto tp = collect("truePeakDbTP"), os = collect("intersampleOvershootDb");
+            if (!tp.empty()) add("maximumTruePeakDbTP", *std::max_element(tp.begin(), tp.end()));
+            if (!os.empty()) add("maximumIntersampleOvershootDb", *std::max_element(os.begin(), os.end()));
+        }
+
         else if (filename.containsIgnoreCase("boundary_dna"))
         {
             const int cc=index("componentClass"), gc=index("inputGainDb"), fc=index("frequencyHz");
@@ -2903,6 +2960,10 @@ namespace
         if (source.containsIgnoreCase("stereo_dna")) return "stereo";
         if (source.containsIgnoreCase("summing_dna")) return "summing";
         if (source.containsIgnoreCase("boundary_dna")) return "boundaries";
+        if (source.containsIgnoreCase("envelope_dna")) return "envelope";
+        if (source.containsIgnoreCase("hysteresis_dna")) return "hysteresis";
+        if (source.containsIgnoreCase("silence_dna")) return "silence";
+        if (source.containsIgnoreCase("truepeak_dna")) return "truepeak";
         return source.upToLastOccurrenceOf(".csv", false, true);
     }
 
@@ -2954,7 +3015,10 @@ namespace
         double worstAlias = -300.0, highestClean = 0.0, firstAlias = std::numeric_limits<double>::infinity();
         double maxCrestReduction = 0.0, maxResponseDeviation = 0.0, maxPhase = 0.0;
         double maxResidual = -300.0, maxInteraction = -300.0;
+        double slowestAttack = 0.0, slowestRelease = 0.0, maxAttackOvershoot = -300.0;
+        double maxHysteresis = 0.0, worstSelfNoise = -300.0, maxTruePeak = -300.0, maxTruePeakOvershoot = 0.0;
         bool haveAlias=false, haveResidual=false, haveInteraction=false;
+        bool haveEnvelope=false, haveHysteresis=false, haveNoise=false, haveTruePeak=false;
 
         auto statMean = [](const juce::var& v) -> double
         {
@@ -3000,6 +3064,29 @@ namespace
                 { const double v=statMean(r->getProperty("overallResidualDb")); if(std::isfinite(v)){maxResidual=std::max(maxResidual,v);haveResidual=true;} }
                 if(auto* i=measurements->getProperty("interaction").getDynamicObject())
                 { const double v=number(i,"worstProductDb"); if(std::isfinite(v)){maxInteraction=std::max(maxInteraction,v);haveInteraction=true;} }
+                if(auto* e=measurements->getProperty("envelope").getDynamicObject())
+                {
+                    const double a=number(e,"slowestAttackMs"), r=number(e,"slowestReleaseMs"), o=number(e,"maximumAttackOvershootDb");
+                    if(std::isfinite(a)){slowestAttack=std::max(slowestAttack,a);haveEnvelope=true;}
+                    if(std::isfinite(r)){slowestRelease=std::max(slowestRelease,r);haveEnvelope=true;}
+                    if(std::isfinite(o)){maxAttackOvershoot=std::max(maxAttackOvershoot,o);haveEnvelope=true;}
+                }
+                if(auto* h=measurements->getProperty("hysteresis").getDynamicObject())
+                {
+                    const double v=number(h,"maximumAbsoluteHysteresisDb");
+                    if(std::isfinite(v)){maxHysteresis=std::max(maxHysteresis,v);haveHysteresis=true;}
+                }
+                if(auto* n=measurements->getProperty("silence").getDynamicObject())
+                {
+                    const double v=number(n,"worstSelfNoiseRmsDbFS");
+                    if(std::isfinite(v)){worstSelfNoise=std::max(worstSelfNoise,v);haveNoise=true;}
+                }
+                if(auto* tp=measurements->getProperty("truepeak").getDynamicObject())
+                {
+                    const double v=number(tp,"maximumTruePeakDbTP"), o=number(tp,"maximumIntersampleOvershootDb");
+                    if(std::isfinite(v)){maxTruePeak=std::max(maxTruePeak,v);haveTruePeak=true;}
+                    if(std::isfinite(o)){maxTruePeakOvershoot=std::max(maxTruePeakOvershoot,o);haveTruePeak=true;}
+                }
             }
         }
         if(haveAlias)extrema->setProperty("worstAliasDb",worstAlias);
@@ -3010,6 +3097,10 @@ namespace
         extrema->setProperty("maximumAbsolutePhaseRotationDegrees",maxPhase);
         if(haveResidual)extrema->setProperty("maximumMeanResidualDbRelativeToOutput",maxResidual);
         if(haveInteraction)extrema->setProperty("worstInteractionProductDbRelativeToInput",maxInteraction);
+        if(haveEnvelope){ extrema->setProperty("slowestAttackMs",slowestAttack); extrema->setProperty("slowestReleaseMs",slowestRelease); extrema->setProperty("maximumAttackOvershootDb",maxAttackOvershoot); }
+        if(haveHysteresis)extrema->setProperty("maximumAbsoluteHysteresisDb",maxHysteresis);
+        if(haveNoise)extrema->setProperty("worstSelfNoiseRmsDbFS",worstSelfNoise);
+        if(haveTruePeak){ extrema->setProperty("maximumTruePeakDbTP",maxTruePeak); extrema->setProperty("maximumIntersampleOvershootDb",maxTruePeakOvershoot); }
         result->setProperty("extrema",juce::var(extrema));
         result->setProperty("note","Thresholds are measurement-derived extrema. Operating-region labels are intentionally deferred until the policy is validated across a larger plugin corpus.");
         return juce::var(result);
@@ -4062,6 +4153,10 @@ void MainComponent::runMeasurement() {
                 if (analyserSelected("Stereo")) passSignals.push_back("stereo");
                 if (analyserSelected("Summing")) passSignals.push_back("summing");
                 if (analyserSelected("Alias")) passSignals.push_back("alias");
+                if (analyserSelected("Envelope")) passSignals.push_back("envelope");
+                if (analyserSelected("Hysteresis")) passSignals.push_back("hysteresis");
+                if (analyserSelected("Silence")) passSignals.push_back("silence");
+                if (analyserSelected("TruePeak")) passSignals.push_back("truepeak");
             }
             else
                 passSignals = { config.signalType };
@@ -4077,6 +4172,13 @@ void MainComponent::runMeasurement() {
             {
                 Config passConfig = config;
                 passConfig.signalType = passSignal;
+                // V20: use an FFT-coherent sine for low-level H2-H10 extraction.
+                if (passSignal.equalsIgnoreCase("sine"))
+                {
+                    constexpr double harmonicFftSize = 16384.0;
+                    const double binHz = passConfig.sampleRate / harmonicFftSize;
+                    passConfig.sineFrequency = std::max(binHz, std::round(passConfig.sineFrequency / binHz) * binHz);
+                }
                 if (passSignal.equalsIgnoreCase("timing"))
                     passConfig.seconds = 0.5; // Impulse, latency and settling need a short capture only.
                 else if (passSignal.equalsIgnoreCase("residual"))
@@ -4089,6 +4191,10 @@ void MainComponent::runMeasurement() {
                     passConfig.seconds = 3.0;
                 else if (passSignal.equalsIgnoreCase("alias"))
                     passConfig.seconds = 5.0; // Ten stepped tones, 0.5 seconds per frequency.
+                else if (passSignal.equalsIgnoreCase("envelope")) passConfig.seconds = 4.0;
+                else if (passSignal.equalsIgnoreCase("hysteresis")) passConfig.seconds = 5.5;
+                else if (passSignal.equalsIgnoreCase("silence")) passConfig.seconds = 2.0;
+                else if (passSignal.equalsIgnoreCase("truepeak")) passConfig.seconds = 1.0;
 
                 // Only create analysers that are valid for this signal. The user's
                 // checkbox choices are preserved; this simply avoids meaningless
@@ -4102,7 +4208,11 @@ void MainComponent::runMeasurement() {
                                                     || analyzerName.equalsIgnoreCase("Boundary")
                                                     || analyzerName.equalsIgnoreCase("Stereo")
                                                     || analyzerName.equalsIgnoreCase("Summing")
-                                                    || analyzerName.equalsIgnoreCase("Alias");
+                                                    || analyzerName.equalsIgnoreCase("Alias")
+                                                    || analyzerName.equalsIgnoreCase("Envelope")
+                                                    || analyzerName.equalsIgnoreCase("Hysteresis")
+                                                    || analyzerName.equalsIgnoreCase("Silence")
+                                                    || analyzerName.equalsIgnoreCase("TruePeak");
                     if (dedicatedPassAnalyzer)
                         continue;
                     if (analyzerName.equalsIgnoreCase("Thd") && !passSignal.equalsIgnoreCase("sine"))
@@ -4341,6 +4451,8 @@ void MainComponent::runMeasurement() {
                         completedExports.emplace_back(PendingExportDataset{ "grid_alias_stress.csv", alias->takeResult() });
                     else if (auto* thd = dynamic_cast<ThdAnalyzer*>(analyzer.get()))
                         completedExports.emplace_back(PendingExportDataset{ juce::String("grid_thd_") + passSignal.toLowerCase() + ".csv", thd->takeResult() });
+                    else if (auto* v20 = dynamic_cast<V20Analyzer*>(analyzer.get()))
+                        completedExports.emplace_back(PendingExportDataset{ juce::String("grid_") + passSignal.toLowerCase() + "_dna.csv", v20->takeResult() });
                 }
             }
 
@@ -4629,7 +4741,7 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
     std::thread([this, outDir, config, summary, datasets = std::move(datasets), fullPackageFiles, pluginPath, pluginInfo, serialPluginPath, serialPluginInfo, additionalPluginPaths, additionalPluginInfos, exportingFullPackage]() mutable {
         auto* root = new juce::DynamicObject();
         root->setProperty("schema", "PluginDNA Evidence Pack");
-        root->setProperty("schemaVersion", 24);
+        root->setProperty("schemaVersion", 25);
         root->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
 
         const juce::File pluginFile(pluginPath);
@@ -5087,7 +5199,7 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
                     feature->setProperty("family", "interaction");
                     const int pc=col(data,"productClass"),gc=col(data,"inputGainDb");
                     const auto overall=collect(data,"magDbRelativeToInput",allRows);addStats(feature,"productDb",overall);
-                    for(int cls=1;cls<=4;++cls){const auto vals=collect(data,"magDbRelativeToInput",[&](const std::vector<double>& row){return std::llround(valueAt(row,pc))==cls;});addStats(feature,"productClass"+juce::String(cls)+"Db",vals);}
+                    for(int cls=1;cls<=5;++cls){const auto vals=collect(data,"magDbRelativeToInput",[&](const std::vector<double>& row){return std::llround(valueAt(row,pc))==cls;});addStats(feature,"productClass"+juce::String(cls)+"Db",vals);}
                     std::vector<std::pair<double,double>> growth;for(const double gain:config.inputGainBucketsDb){const double v=meanColumn(data,"magDbRelativeToInput",[&](const std::vector<double>& row){return std::abs(valueAt(row,gc)-gain)<0.01;});if(std::isfinite(v))growth.push_back({gain,v});}
                     if(growth.size()>=2){addNumber(feature,"interactionGrowthDb",growth.back().second-growth.front().second);addNumber(feature,"interactionGrowthDbPerInputDb",(growth.back().second-growth.front().second)/std::max(1.0,growth.back().first-growth.front().first));}
                     if(!overall.empty()){addNumber(feature,"productDensityAboveMinus80Db",static_cast<double>(std::count_if(overall.begin(),overall.end(),[](double v){return v>-80.0;}))/overall.size());addNumber(feature,"worstProductDb",*std::max_element(overall.begin(),overall.end()));}
@@ -5131,6 +5243,52 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
                     addStats(feature,"nonAdditivityPercent",collect(data,"nonAdditivityPercent",allRows));
                     useful=!data.rows.empty();
                 }
+
+                else if (exportItem.filename.containsIgnoreCase("grid_envelope_dna"))
+                {
+                    feature->setProperty("family", "dynamicEnvelope");
+                    const auto attack=collect(data,"attackMs",allRows), release=collect(data,"releaseMs",allRows);
+                    const auto over=collect(data,"attackOvershootDb",allRows), under=collect(data,"releaseUndershootDb",allRows);
+                    addStats(feature,"attackMs",attack); addStats(feature,"releaseMs",release);
+                    addStats(feature,"attackOvershootDb",over); addStats(feature,"releaseUndershootDb",under);
+                    addStats(feature,"lowGainDb",collect(data,"lowGainDb",allRows)); addStats(feature,"highGainDb",collect(data,"highGainDb",allRows));
+                    if(!attack.empty()) addNumber(feature,"slowestAttackMs",*std::max_element(attack.begin(),attack.end()));
+                    if(!release.empty()) addNumber(feature,"slowestReleaseMs",*std::max_element(release.begin(),release.end()));
+                    if(!over.empty()) addNumber(feature,"maximumAttackOvershootDb",*std::max_element(over.begin(),over.end()));
+                    useful=!data.rows.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_hysteresis_dna"))
+                {
+                    feature->setProperty("family", "hysteresisMemory");
+                    const auto h=collect(data,"hysteresisDb",allRows);
+                    addStats(feature,"hysteresisDb",h); addStats(feature,"upGainDb",collect(data,"upGainDb",allRows)); addStats(feature,"downGainDb",collect(data,"downGainDb",allRows));
+                    if(!h.empty())
+                    {
+                        const double maxAbs=std::abs(*std::max_element(h.begin(),h.end(),[](double a,double b){return std::abs(a)<std::abs(b);}));
+                        double sum=0.0; for(double v:h) sum+=std::abs(v);
+                        addNumber(feature,"maximumAbsoluteHysteresisDb",maxAbs); addNumber(feature,"meanAbsoluteHysteresisDb",sum/h.size());
+                    }
+                    useful=!h.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_silence_dna"))
+                {
+                    feature->setProperty("family", "selfNoise");
+                    const auto r=collect(data,"outputRmsDbFS",allRows), pk=collect(data,"outputPeakDbFS",allRows), dc=collect(data,"dcOffset",allRows);
+                    addStats(feature,"outputRmsDbFS",r); addStats(feature,"outputPeakDbFS",pk); addStats(feature,"dcOffset",dc); addStats(feature,"noiseVariationDb",collect(data,"noiseVariationDb",allRows));
+                    if(!r.empty()) addNumber(feature,"worstSelfNoiseRmsDbFS",*std::max_element(r.begin(),r.end()));
+                    if(!pk.empty()) addNumber(feature,"worstSelfNoisePeakDbFS",*std::max_element(pk.begin(),pk.end()));
+                    useful=!data.rows.empty();
+                }
+                else if (exportItem.filename.containsIgnoreCase("grid_truepeak_dna"))
+                {
+                    feature->setProperty("family", "truePeak");
+                    const auto tp=collect(data,"truePeakDbTP",allRows), os=collect(data,"intersampleOvershootDb",allRows);
+                    addStats(feature,"samplePeakDbFS",collect(data,"samplePeakDbFS",allRows)); addStats(feature,"truePeakDbTP",tp); addStats(feature,"intersampleOvershootDb",os);
+                    if(!tp.empty()) addNumber(feature,"maximumTruePeakDbTP",*std::max_element(tp.begin(),tp.end()));
+                    if(!os.empty()) addNumber(feature,"maximumIntersampleOvershootDb",*std::max_element(os.begin(),os.end()));
+                    useful=!data.rows.empty();
+                }
+
                 else if (exportItem.filename.containsIgnoreCase("grid_boundary_dna"))
                 {
                     feature->setProperty("family", "boundaries");
@@ -5147,8 +5305,8 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
             }
 
             auto* featureDna = new juce::DynamicObject();
-            featureDna->setProperty("extractorVersion", 7);
-            featureDna->setProperty("policy", "compact evidence v2 plus complete static feature audit, operating-point DNA, alias thresholds, stereo, summing, residual entropy, harmonic stability and transfer efficiency extraction");
+            featureDna->setProperty("extractorVersion", 8);
+            featureDna->setProperty("policy", "compact evidence v2 plus complete static feature audit, operating-point DNA, dynamic envelope, hysteresis memory, self-noise, true peak, alias thresholds, stereo, summing, residual entropy, harmonic stability and transfer efficiency extraction");
             featureDna->setProperty("analysers", analyserFeatures);
             root->setProperty("featureDNA", juce::var(featureDna));
         }
@@ -5878,7 +6036,7 @@ void MainComponent::exportEvidencePack(const juce::File& overrideOutputDirectory
         {
             auto* manifest = new juce::DynamicObject();
             manifest->setProperty("schema", "PluginDNA Full Evidence Manifest");
-            manifest->setProperty("schemaVersion", 24);
+            manifest->setProperty("schemaVersion", 25);
             manifest->setProperty("createdUtc", juce::Time::getCurrentTime().toISO8601(true));
             manifest->setProperty("evidenceFile", filename);
             manifest->setProperty("plugin", juce::File(pluginPath).getFileNameWithoutExtension());

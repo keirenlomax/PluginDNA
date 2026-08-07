@@ -28,17 +28,17 @@ public:
             run.initialised = true;
             run.inputGainDb = ctx.inputGainDb;
             run.paramValues = ctx.paramNamedValues;
-            run.halfSample = static_cast<int64_t>(durationSeconds * sampleRate * 0.5);
+            run.sectionSample = std::max<int64_t>(1, static_cast<int64_t>(durationSeconds * sampleRate / 3.0));
             initialiseBanks(run);
         }
 
         for (int i = 0; i < ctx.numSamples; ++i)
         {
             const int64_t absoluteSample = ctx.firstSample + i;
-            const bool broadband = absoluteSample < run.halfSample;
+            const int test = juce::jlimit(0, 2, static_cast<int>(absoluteSample / run.sectionSample));
             const float input = ctx.inL != nullptr ? ctx.inL[i] : 0.0f;
             const float output = ctx.outL != nullptr ? ctx.outL[i] : 0.0f;
-            auto& bank = broadband ? run.broadband : run.highPair;
+            auto& bank = test == 0 ? run.broadband : (test == 1 ? run.highPair : run.lowImd);
             bank.inputEnergy += static_cast<double>(input) * input;
             bank.sampleCount++;
             for (auto& detector : bank.detectors)
@@ -108,11 +108,12 @@ private:
     struct RunState
     {
         bool initialised = false;
-        int64_t halfSample = 0;
+        int64_t sectionSample = 0;
         float inputGainDb = 0.0f;
         std::map<juce::String, float> paramValues;
         Bank broadband;
         Bank highPair;
+        Bank lowImd;
     };
 
     static std::vector<std::pair<double, int>> buildBroadbandProducts()
@@ -146,6 +147,14 @@ private:
                  {38000.0, 4}, {39000.0, 2}, {40000.0, 4} };
     }
 
+    static std::vector<std::pair<double, int>> buildLowImdProducts()
+    {
+        std::vector<std::pair<double,int>> p;
+        for (int n=1;n<=5;++n) { p.emplace_back(7000.0-60.0*n, 5); p.emplace_back(7000.0+60.0*n, 5); }
+        p.emplace_back(120.0,3); p.emplace_back(14000.0,3);
+        return p;
+    }
+
     void initialiseBank(Bank& bank, const std::vector<std::pair<double, int>>& products)
     {
         bank.detectors.reserve(products.size());
@@ -162,6 +171,7 @@ private:
     {
         initialiseBank(run.broadband, buildBroadbandProducts());
         initialiseBank(run.highPair, buildHighPairProducts());
+        initialiseBank(run.lowImd, buildLowImdProducts());
     }
 
     static double amplitudeToDb(double amplitude)
@@ -200,6 +210,7 @@ private:
         {
             appendBankRows(runId, 1, run.broadband, run);
             appendBankRows(runId, 2, run.highPair, run);
+            appendBankRows(runId, 3, run.lowImd, run);
         }
     }
 

@@ -8,6 +8,7 @@
 #include "StereoAnalyzer.h"
 #include "SummingAnalyzer.h"
 #include "AliasAnalyzer.h"
+#include "V20Analyzers.h"
 #include "PluginLoader.h"
 #include "RawCsvAnalyzer.h"
 #include "RmsPeakAnalyzer.h"
@@ -122,6 +123,10 @@ std::vector<std::unique_ptr<Analyzer>> createAnalyzers(const Config& config, con
         analyzers.push_back(createAliasAnalyzer(config.sampleRate, config.seconds, paramNames));
         return analyzers;
     }
+    if (config.signalType.equalsIgnoreCase("envelope")) { analyzers.push_back(createV20Analyzer(V20Analyzer::Mode::Envelope, config.sampleRate, config.seconds, paramNames)); return analyzers; }
+    if (config.signalType.equalsIgnoreCase("hysteresis")) { analyzers.push_back(createV20Analyzer(V20Analyzer::Mode::Hysteresis, config.sampleRate, config.seconds, paramNames)); return analyzers; }
+    if (config.signalType.equalsIgnoreCase("silence")) { analyzers.push_back(createV20Analyzer(V20Analyzer::Mode::Silence, config.sampleRate, config.seconds, paramNames)); return analyzers; }
+    if (config.signalType.equalsIgnoreCase("truepeak")) { analyzers.push_back(createV20Analyzer(V20Analyzer::Mode::TruePeak, config.sampleRate, config.seconds, paramNames)); return analyzers; }
 
     for (const auto& analyzerName : config.analyzers) {
         if (analyzerName.equalsIgnoreCase("RawCsv")) {
@@ -141,7 +146,7 @@ std::vector<std::unique_ptr<Analyzer>> createAnalyzers(const Config& config, con
         } else if (analyzerName.equalsIgnoreCase("Thd")) {
             if (config.signalType.equalsIgnoreCase("sine")) {
                 analyzers.push_back(
-                    createThdAnalyzer(outDir, 2048, config.sineFrequency, paramNames, config.signalType));
+                    createThdAnalyzer(outDir, 16384, config.sineFrequency, paramNames, config.signalType));
             } else {
                 std::cerr << "Warning: Thd analyzer requires sine signal type" << std::endl;
             }
@@ -212,6 +217,10 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
         std::unique_ptr<StereoTestGenerator> stereoGen;
         std::unique_ptr<SummingTestGenerator> summingGen;
         std::unique_ptr<AliasStressGenerator> aliasGen;
+        std::unique_ptr<DynamicEnvelopeGenerator> envelopeGen;
+        std::unique_ptr<HysteresisGenerator> hysteresisGen;
+        std::unique_ptr<SilenceGenerator> silenceGen;
+        std::unique_ptr<TruePeakGenerator> truePeakGen;
 
         if (config.signalType.equalsIgnoreCase("sine")) {
             sineGen = std::make_unique<SineGenerator>();
@@ -258,6 +267,14 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
         } else if (config.signalType.equalsIgnoreCase("alias")) {
             aliasGen = std::make_unique<AliasStressGenerator>();
             aliasGen->sampleRate = sampleRate; aliasGen->duration = config.seconds; aliasGen->amplitude = inputGainLinear; aliasGen->reset();
+        } else if (config.signalType.equalsIgnoreCase("envelope")) {
+            envelopeGen=std::make_unique<DynamicEnvelopeGenerator>(); envelopeGen->sampleRate=sampleRate; envelopeGen->duration=config.seconds; envelopeGen->amplitude=inputGainLinear; envelopeGen->reset();
+        } else if (config.signalType.equalsIgnoreCase("hysteresis")) {
+            hysteresisGen=std::make_unique<HysteresisGenerator>(); hysteresisGen->sampleRate=sampleRate; hysteresisGen->duration=config.seconds; hysteresisGen->amplitude=inputGainLinear; hysteresisGen->reset();
+        } else if (config.signalType.equalsIgnoreCase("silence")) {
+            silenceGen=std::make_unique<SilenceGenerator>();
+        } else if (config.signalType.equalsIgnoreCase("truepeak")) {
+            truePeakGen=std::make_unique<TruePeakGenerator>(); truePeakGen->sampleRate=sampleRate; truePeakGen->amplitude=inputGainLinear;
         }
 
         // Process samples
@@ -289,7 +306,10 @@ void runMeasurementGrid(juce::AudioPluginInstance& plugin, double sampleRate, in
                 summingGen->fillBlock(inputBuffer, numThisBlock);
             } else if (aliasGen) {
                 aliasGen->fillBlock(inputBuffer, numThisBlock);
-            }
+            } else if (envelopeGen) envelopeGen->fillBlock(inputBuffer,numThisBlock);
+            else if (hysteresisGen) hysteresisGen->fillBlock(inputBuffer,numThisBlock);
+            else if (silenceGen) silenceGen->fillBlock(inputBuffer,numThisBlock);
+            else if (truePeakGen) truePeakGen->fillBlock(inputBuffer,numThisBlock);
 
             // Copy input to output buffer (processBlock works in-place)
             outputBuffer.makeCopyOf(inputBuffer);
